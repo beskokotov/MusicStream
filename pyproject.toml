@@ -20,6 +20,9 @@ musicstream = "musicstream:main"
 hitmos = [
     "playwright>=1.49",
 ]
+torrent = [
+    "libtorrent>=2.1.1,<2.2; sys_platform == 'win32' and platform_machine == 'AMD64'",
+]
 
 [build-system]
 requires = ["uv_build>=0.13.7,<0.14.0"]

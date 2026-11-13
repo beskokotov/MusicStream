@@ -201,6 +201,15 @@ wheels = [
 ]
 
 [[package]]
+name = "libtorrent"
+version = "2.1.1"
+source = { registry = "https://pypi.org/simple" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/5a/8f/a262d268098f58f17a221c8b8c632eaf187bc810b4cf2a633937b3c6bd3e/libtorrent-2.1.1-cp312-cp312-win_amd64.whl", hash = "sha256:493954405d15f14b9d9f9b1762ae78e7fecc5a44699f74cb433a9800fa3a7b45", size = 5018631, upload-time = "2026-08-10T17:38:03.893Z" },
+    { url = "https://files.pythonhosted.org/packages/f0/2b/b843874837440dadb6d6cde2374a311367efdb40f86375de46cf9a0e59ea/libtorrent-2.1.1-cp313-cp313-win_amd64.whl", hash = "sha256:fa11aa801d5b9184f067f559c465d3074a4e878d9c671b00dd4930d6dfce2b46", size = 5018669, upload-time = "2026-08-10T17:38:19.403Z" },
+]
+
+[[package]]
 name = "musicstream"
 version = "0.1.0"
 source = { editable = "." }
@@ -214,6 +223,9 @@ dependencies = [
 hitmos = [
     { name = "playwright" },
 ]
+torrent = [
+    { name = "libtorrent", marker = "platform_machine == 'AMD64' and sys_platform == 'win32'" },
+]
 
 [package.dev-dependencies]
 dev = [
@@ -224,10 +236,11 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.162.5" },
     { name = "httpx", specifier = ">=0.28.1" },
+    { name = "libtorrent", marker = "platform_machine == 'AMD64' and sys_platform == 'win32' and extra == 'torrent'", specifier = ">=2.1.1,<2.2" },
     { name = "playwright", marker = "extra == 'hitmos'", specifier = ">=1.49" },
     { name = "uvicorn", specifier = ">=0.54.0" },
 ]
-provides-extras = ["hitmos"]
+provides-extras = ["hitmos", "torrent"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.3" }]

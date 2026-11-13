@@ -811,3 +811,54 @@ uv run --extra hitmos uvicorn musicstream.main:app --host 127.0.0.1 --port 8000
 только на `127.0.0.1:8001` прежней командой; настройки туннеля и Pages не менялись.
 
 Проверка: `uv run --extra hitmos pytest -q`.
+
+# Экспериментальные торрент-метаданные
+
+На Windows x64 с Python 3.12 установите необязательную зависимость: `uv sync --extra torrent` (при использовании Hitmos: `uv sync --extra hitmos --extra torrent`). Обычный запуск MusicStream не создаёт BitTorrent-сессию.
+
+Локальный `.torrent` можно просмотреть без сети:
+
+```python
+from musicstream.torrent import inspect_torrent, select_audio_file
+
+metadata = inspect_torrent(r"C:\path\to\allowed.torrent")
+for item in metadata.files:
+    print(item.index, item.name, item.size, item.extension)
+selected = select_audio_file(metadata, 0)  # только MP3, FLAC, OGG или M4A
+```
+
+`inspect_magnet(uri)` читает только поля URI и возвращает пустой список файлов. Только явный вызов `fetch_magnet_metadata(uri)` запрашивает метаданные у пиров. URL трекеров из magnet игнорируются; аудиоданные не запрашиваются. Без доступных пиров получение метаданных завершится по тайм-ауту. Настройки: `MUSICSTREAM_TORRENT_TEMP_DIR` для временного каталога и `MUSICSTREAM_TORRENT_CACHE_MAX_BYTES` (по умолчанию 16 МиБ) для максимального размера принимаемых метаданных. Временные файлы удаляются по завершении вызова.
+
+Для экспериментальной передачи диапазонов используйте `TorrentSessionManager`. Он принимает локальный `.torrent`, индекс выбранного аудиофайла и только явно заданных пиров на `127.0.0.1` или `::1`. Сессия создаётся при входе в контекст; диапазон `[start, end)` отсчитывается от начала выбранного файла. Все пересекающие диапазон pieces получают приоритет 7, остальные — 0. Данные возвращаются после проверки pieces библиотекой. Piece на границе файлов может содержать байты соседнего файла. Трекеры, DHT, UPnP, NAT-PMP и LSD отключены; сессия слушает только loopback. Ограничения `max_sessions`, `max_connections` и `TorrentSettings.cache_max_bytes` задаются при создании менеджера. Дисковый бюджет делится между одновременными сессиями; после его исчерпания закройте контекст и откройте новый. Выход из контекста удаляет временные файлы.
+
+```python
+from musicstream.torrent import TorrentSessionManager
+
+manager = TorrentSessionManager()
+async with manager.open_torrent(r"C:\path\to\allowed.torrent", 0,
+                                peers=(("127.0.0.1", 50000),)) as selected:
+    chunk = await selected.read_range(0, 65536, timeout_seconds=10)
+```
+
+## Локальный HTTP Range для тестового альбома
+
+Экспериментальный маршрут включается только при `MUSICSTREAM_TORRENT_HTTP_ENABLED=true` в локальном приложении. Сервер заранее регистрирует файлы по индексам; запросы не принимают пути, `.torrent` и magnet URI. `public_api.py` этот маршрут не подключает. Доступ разрешён только клиентам с loopback-адреса. Трекеры и DHT не используются.
+
+В первом PowerShell-окне запустите локальный seeder для своих MP3 с разрешённым использованием:
+
+```powershell
+uv run --extra torrent python scripts/local_torrent_seeder.py test_media/TorrentTestAlbum
+```
+
+Он выведет путь к локальному `.torrent`, номера `track-0` и далее, а также `Loopback peer port`. Оставьте процесс запущенным. Во втором окне задайте выведенный порт и запустите локальный сервер:
+
+```powershell
+$env:MUSICSTREAM_TORRENT_HTTP_ENABLED = 'true'
+$env:MUSICSTREAM_TORRENT_HTTP_SOURCE = (Resolve-Path 'test_media/TorrentTestAlbum.local.torrent').Path
+$env:MUSICSTREAM_TORRENT_HTTP_FILE_INDEXES = '0,1,2,3,4'
+$env:MUSICSTREAM_TORRENT_HTTP_PEER_PORT = '<Loopback peer port>'
+$env:MUSICSTREAM_TORRENT_CACHE_MAX_BYTES = '67108864'
+uv run --extra hitmos --extra torrent uvicorn musicstream.main:app --host 127.0.0.1 --port 8000
+```
+
+Откройте в браузере `http://127.0.0.1:8000/api/experimental/torrent/track-1`. В сетевой панели браузера запросы при перемотке должны получать `206` с `Content-Range`. `HEAD` и `GET` без Range возвращают `200`; некорректный или недоступный однодиапазонный `Range` возвращает `416` с `Content-Range: bytes */<размер>`. Тело ответа передаётся блоками по 64 КиБ; сессия сохраняется между запросами и закрывается после 30 секунд простоя. Поддерживается один диапазон за запрос. При нехватке дискового бюджета сессия обновляется после освобождения других потоков.

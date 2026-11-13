@@ -252,6 +252,9 @@ const musicPlayer = (() => {
   let selected, player, request, polling, apiPromise, frameTimer;
   let generation = 0;
   let ready = false;
+  let torrentAutoAvailable = false;
+  let torrentJobId = null;
+  let torrentRequest = null;
 
   function controls(enabled) {
     ready = enabled;
@@ -259,11 +262,18 @@ const musicPlayer = (() => {
     volume.disabled = !enabled;
     seek.disabled = true;
     play.textContent = "▶";
-    play.setAttribute("aria-label", activeKind === "hitmos" ? "Воспроизвести аудио Hitmos" : "Воспроизвести видео YouTube");
+    play.setAttribute("aria-label", activeKind === "torrent" ? "Воспроизвести аудио" : activeKind === "hitmos" ? "Воспроизвести аудио Hitmos" : "Воспроизвести видео YouTube");
   }
 
   function stop() {
     generation += 1;
+    torrentRequest?.abort();
+    torrentRequest = null;
+    if (torrentJobId) {
+      const cancelled = torrentJobId;
+      torrentJobId = null;
+      fetch(`/api/experimental/playback/prepare/${encodeURIComponent(cancelled)}`, { method: "DELETE" }).catch(() => {});
+    }
     preparedSource = null;
     activeKind = null;
     audio.pause();
@@ -288,7 +298,12 @@ const musicPlayer = (() => {
 
   function fail(text, stage = null, code = null) {
     controls(false);
-    if (activeKind === "hitmos") audio.pause();
+    if (activeKind === "torrent" && torrentJobId) {
+      const cancelled = torrentJobId;
+      torrentJobId = null;
+      fetch(`/api/experimental/playback/prepare/${encodeURIComponent(cancelled)}`, { method: "DELETE" }).catch(() => {});
+    }
+    if (activeKind === "hitmos" || activeKind === "torrent") audio.pause();
     clearInterval(polling);
     clearTimeout(frameTimer);
     playbackState.textContent = "Недоступно";
@@ -325,13 +340,13 @@ const musicPlayer = (() => {
   }
 
   function updateProgress() {
-    if (!ready || (activeKind !== "hitmos" && !player?.getCurrentTime)) return;
-    const current = activeKind === "hitmos" ? audio.currentTime : player.getCurrentTime();
-    const total = activeKind === "hitmos" ? audio.duration : player.getDuration();
+    if (!ready || (!["hitmos", "torrent"].includes(activeKind) && !player?.getCurrentTime)) return;
+    const current = ["hitmos", "torrent"].includes(activeKind) ? audio.currentTime : player.getCurrentTime();
+    const total = ["hitmos", "torrent"].includes(activeKind) ? audio.duration : player.getDuration();
     if (Number.isFinite(total) && total > 0) {
       seek.max = String(total);
       seek.value = String(current);
-      seek.disabled = activeKind === "hitmos" && (audio.seekable.length === 0
+      seek.disabled = ["hitmos", "torrent"].includes(activeKind) && (audio.seekable.length === 0
         || audio.seekable.end(audio.seekable.length - 1) <= audio.seekable.start(0));
       document.querySelector("#player-time").textContent = duration(current);
       document.querySelector("#player-duration").textContent = duration(total);
@@ -439,7 +454,17 @@ const musicPlayer = (() => {
   }
 
   function audioWaiting() {
-    if (activeKind !== "hitmos" || (audio.paused && audio.readyState >= 1)) return;
+    if (!["hitmos", "torrent"].includes(activeKind) || (audio.paused && audio.readyState >= 1)) return;
+    if (activeKind === "torrent") {
+      playbackState.textContent = "buffering";
+      section.setAttribute("aria-busy", "true");
+      clearTimeout(frameTimer);
+      frameTimer = setTimeout(() => {
+        if (activeKind === "torrent" && audio.readyState < 3)
+          fail("Композиция сейчас недоступна.");
+      }, 12000);
+      return;
+    }
     playbackState.textContent = "Загрузка · Hitmos";
     message.textContent = "Этап: загрузка CDN. Браузер ожидает аудиоданные; результат сопоставления не изменился.";
     section.setAttribute("aria-busy", "true");
@@ -447,6 +472,69 @@ const musicPlayer = (() => {
     frameTimer = setTimeout(() => {
       if (activeKind === "hitmos") fail("Данные не поступили вовремя. Это не ошибка сопоставления. Можно открыть Hitmos.", "cdn_response", "audio_load_timeout");
     }, 15000);
+  }
+
+  async function prepareTorrent() {
+    if (!selected || !torrentAutoAvailable) return;
+    stop();
+    activeKind = "torrent";
+    const current = generation;
+    const track = selected;
+    torrentJobId = crypto.randomUUID();
+    torrentRequest = new AbortController();
+    playbackState.textContent = "preparing";
+    message.textContent = "Подготавливаем композицию…";
+    section.setAttribute("aria-busy", "true");
+    try {
+      const response = await fetch("/api/experimental/playback/prepare", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ request_id: torrentJobId, id: track.id, title: track.title,
+          artist: track.artist, album: track.album, duration_seconds: track.duration_seconds }),
+        signal: torrentRequest.signal,
+      });
+      if (current !== generation) return;
+      if (!response.ok) throw new Error("prepare failed");
+      const started = await response.json();
+      if (started.job_id !== torrentJobId) throw new Error("invalid preparation");
+      while (current === generation) {
+        const poll = await fetch(`/api/experimental/playback/prepare/${encodeURIComponent(torrentJobId)}`,
+          { signal: torrentRequest.signal });
+        if (!poll.ok) throw new Error("preparation status failed");
+        const result = await poll.json();
+        if (current !== generation) return;
+        if (result.status === "ready") {
+          if (!/^\/api\/experimental\/torrent\/[A-Za-z0-9_-]{1,64}$/.test(result.stream_url || ""))
+            throw new Error("invalid stream path");
+          audio.hidden = true;
+          audio.volume = Number(volume.value) / 100;
+          audio.src = result.stream_url;
+          audio.load();
+          playbackState.textContent = "buffering";
+          message.textContent = "Загружаем аудио…";
+          play.disabled = false;
+          try { await audio.play(); }
+          catch (error) {
+            if (current === generation && error.name !== "AbortError") {
+              playbackState.textContent = "ready";
+              message.textContent = "Нажмите Play для запуска аудио.";
+            }
+          }
+          return;
+        }
+        if (result.status === "unavailable" || result.status === "error") {
+          fail(result.status === "error" ? "Ошибка подготовки композиции." : "Композиция сейчас недоступна.");
+          playbackState.textContent = result.status;
+          return;
+        }
+        playbackState.textContent = result.status === "buffering" ? "buffering" : "preparing";
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+    } catch (error) {
+      if (current === generation && error.name !== "AbortError") {
+        fail("Не удалось подготовить композицию.");
+        playbackState.textContent = "error";
+      }
+    }
   }
 
   function playHitmos(item) {
@@ -472,6 +560,10 @@ const musicPlayer = (() => {
   }
 
   function audioFailure(errorName) {
+    if (activeKind === "torrent") {
+      fail("Композиция сейчас недоступна.");
+      return;
+    }
     if (activeKind !== "hitmos") return;
     if (errorName === "NotAllowedError") {
       fail("Браузер требует действие пользователя. Нажмите Play в видимом аудиоплеере; совпадение записи не отклонено.", "browser_playback", "play_not_allowed");
@@ -485,12 +577,23 @@ const musicPlayer = (() => {
   }
 
   audio.addEventListener("loadedmetadata", () => {
-    if (activeKind !== "hitmos") return;
+    if (!["hitmos", "torrent"].includes(activeKind)) return;
     controls(true);
     updateProgress();
   });
   audio.addEventListener("playing", () => {
-    if (activeKind !== "hitmos" || audio.paused || audio.ended) return;
+    if (!["hitmos", "torrent"].includes(activeKind) || audio.paused || audio.ended) return;
+    if (activeKind === "torrent") {
+      clearTimeout(frameTimer);
+      controls(true);
+      play.textContent = "Ⅱ";
+      play.setAttribute("aria-label", "Пауза аудио");
+      playbackState.textContent = "ready";
+      message.textContent = "Воспроизведение";
+      section.setAttribute("aria-busy", "false");
+      updateProgress();
+      return;
+    }
     clearTimeout(frameTimer);
     controls(true);
     play.textContent = "Ⅱ";
@@ -501,7 +604,14 @@ const musicPlayer = (() => {
     updateProgress();
   });
   audio.addEventListener("pause", () => {
-    if (activeKind !== "hitmos" || !ready) return;
+    if (!["hitmos", "torrent"].includes(activeKind) || !ready) return;
+    if (activeKind === "torrent") {
+      play.textContent = "▶";
+      play.setAttribute("aria-label", "Воспроизвести аудио");
+      playbackState.textContent = "ready";
+      section.setAttribute("aria-busy", "false");
+      return;
+    }
     clearTimeout(frameTimer);
     play.textContent = "▶";
     play.setAttribute("aria-label", "Воспроизвести аудио Hitmos");
@@ -510,6 +620,12 @@ const musicPlayer = (() => {
   });
   audio.addEventListener("timeupdate", updateProgress);
   audio.addEventListener("ended", () => {
+    if (activeKind === "torrent") {
+      playbackState.textContent = "ready";
+      play.textContent = "▶";
+      play.setAttribute("aria-label", "Воспроизвести аудио");
+      return;
+    }
     if (activeKind === "hitmos") {
       playbackState.textContent = "Завершено · Hitmos";
       play.textContent = "▶";
@@ -519,7 +635,7 @@ const musicPlayer = (() => {
   audio.addEventListener("progress", updateProgress);
   audio.addEventListener("waiting", audioWaiting);
   audio.addEventListener("error", () => {
-    if (activeKind === "hitmos" && audio.error) audioFailure();
+    if (["hitmos", "torrent"].includes(activeKind) && audio.error) audioFailure();
   });
 
   function showCandidates(items, sourceName) {
@@ -711,6 +827,19 @@ const musicPlayer = (() => {
     resolveButton.disabled = false;
     candidates.replaceChildren();
     reports.replaceChildren();
+    if (torrentAutoAvailable && selected && source.value === "auto" && !demoMode) {
+      resolveButton.disabled = true;
+      hitmosSearch.hidden = true;
+      hitmosForm.hidden = true;
+      document.querySelector("#hitmos-advanced").hidden = true;
+      document.querySelector("#youtube-advanced").hidden = true;
+      externalSearch.hidden = true;
+      play.disabled = false;
+      play.setAttribute("aria-label", "Воспроизвести композицию");
+      playbackState.textContent = "Нажмите Play";
+      message.textContent = "Нажмите Play.";
+      return;
+    }
     const isHitmos = source.value === "hitmos";
     const isAuto = source.value === "auto";
     hitmosSearch.hidden = !(isHitmos || isAuto);
@@ -726,9 +855,13 @@ const musicPlayer = (() => {
   }
   source.addEventListener("change", sourceChanged);
   play.addEventListener("click", () => {
+    if (torrentAutoAvailable && source.value === "auto" && selected && activeKind !== "torrent") {
+      prepareTorrent();
+      return;
+    }
     if (preparedSource) { resolveSource(preparedSource.id, true, preparedSource.source); return; }
     if (!ready) return;
-    if (activeKind === "hitmos") {
+    if (activeKind === "hitmos" || activeKind === "torrent") {
       if (!audio.paused) audio.pause();
       else audio.play().catch(error => audioFailure(error.name));
       return;
@@ -739,7 +872,7 @@ const musicPlayer = (() => {
   });
   seek.addEventListener("change", () => {
     if (!ready) return;
-    if (activeKind === "hitmos") {
+    if (activeKind === "hitmos" || activeKind === "torrent") {
       if (audio.seekable.length && audio.seekable.end(audio.seekable.length - 1) > audio.seekable.start(0)) {
         audio.currentTime = Math.max(audio.seekable.start(0), Math.min(Number(seek.value), audio.seekable.end(audio.seekable.length - 1)));
       }
@@ -748,13 +881,22 @@ const musicPlayer = (() => {
   });
   volume.addEventListener("input", () => {
     if (!ready) return;
-    if (activeKind === "hitmos") { audio.muted = false; audio.volume = Number(volume.value) / 100; }
+    if (activeKind === "hitmos" || activeKind === "torrent") { audio.muted = false; audio.volume = Number(volume.value) / 100; }
     else player.setVolume(Number(volume.value));
   });
   document.addEventListener("visibilitychange", () => { if (document.hidden && ready && activeKind === "youtube") player.pauseVideo(); });
   new IntersectionObserver(entries => {
     if (!entries[0].isIntersecting && ready && player?.getPlayerState() === 1) player.pauseVideo();
   }).observe(frameArea);
+
+  if (location.hostname === "127.0.0.1" || location.hostname === "localhost") {
+    fetch("/api/experimental/playback/capabilities")
+      .then(response => response.ok ? response.json() : null)
+      .then(result => {
+        torrentAutoAvailable = result?.available === true;
+        if (torrentAutoAvailable && selected && source.value === "auto") sourceChanged();
+      }).catch(() => {});
+  }
 
   return {
     select(track) {

@@ -28,3 +28,5 @@ credentials*.json
 .coverage
 htmlcov/
 *.log
+
+test_media/

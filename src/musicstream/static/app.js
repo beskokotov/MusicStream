@@ -12,6 +12,21 @@ const table = document.querySelector("#track-table");
 const list = document.querySelector("#track-list");
 const count = document.querySelector("#result-count");
 const template = document.querySelector("#track-template");
+const config = window.MUSICSTREAM_CONFIG || {};
+let demoMode = config.demoMode !== false;
+let apiBaseUrl = "";
+try {
+  if (config.apiBaseUrl) {
+    const url = new URL(config.apiBaseUrl);
+    if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash
+        || ["api.deezer.com", "musicbrainz.org"].includes(url.hostname)) {
+      throw new Error("Invalid backend URL");
+    }
+    apiBaseUrl = url.href.replace(/\/+$/, "");
+  }
+} catch {
+  demoMode = true;
+}
 let timer;
 let controller;
 let revision = 0;
@@ -37,6 +52,11 @@ function setState(title, description, { loading = false, error = false } = {}) {
 
 function reset() {
   list.replaceChildren();
+  if (demoMode) {
+    count.textContent = "Предпросмотр интерфейса";
+    setState("Реальный поиск пока недоступен", "Сейчас открыт демонстрационный режим.\nПоиск появится после подключения внешнего backend.");
+    return;
+  }
   count.textContent = "Начните с любимого исполнителя";
   setState("Что звучит у вас в голове?", "Введите название трека или имя исполнителя.\nВаша следующая находка — всего в одном поиске.");
 }
@@ -109,6 +129,10 @@ function cancelSearch() {
 
 async function search() {
   cancelSearch();
+  if (demoMode) {
+    reset();
+    return;
+  }
   const query = input.value.trim();
   if (!query) {
     reset();
@@ -120,7 +144,7 @@ async function search() {
   setState("Ищем вашу музыку…", "Ещё немного — собираем результаты.", { loading: true });
   try {
     const params = new URLSearchParams({ q: query, limit: "25" });
-    const response = await fetch(`/api/search?${params}`, { signal: controller.signal });
+    const response = await fetch(`${apiBaseUrl}/api/search?${params}`, { signal: controller.signal });
     if (current !== revision) return;
     if (!response.ok) {
       const messages = {
@@ -158,6 +182,10 @@ async function search() {
 
 input.addEventListener("input", () => {
   cancelSearch();
+  if (demoMode) {
+    reset();
+    return;
+  }
   if (!input.value.trim()) {
     reset();
     return;
@@ -179,4 +207,14 @@ document.querySelectorAll("[data-query]").forEach(button => {
   });
 });
 
+document.querySelector("#demo-banner").hidden = !demoMode;
+if (demoMode) {
+  document.querySelector("#demo-banner").hidden = false;
+  document.querySelector(".source-pill").textContent = "Демо · без подключения к API";
+  document.querySelector(".page-footer > span:last-child").textContent = "MusicStream · демонстрационный режим";
+  input.placeholder = "Поиск пока недоступен";
+  input.disabled = true;
+  document.querySelector("#search-submit").disabled = true;
+  document.querySelectorAll("[data-query]").forEach(button => { button.disabled = true; });
+}
 reset();

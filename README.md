@@ -154,3 +154,102 @@ uv run --project E:\MusicStream uvicorn musicstream.main:app --reload --reload-d
 `/`, `/health`, `/api/search` и `/docs` остаются доступны. Тесты `/app`
 и ресурсов запускаются общей командой `uv run pytest -q`, в том числе
 с изменённой рабочей папкой процесса.
+
+
+## GitHub Pages: отдельная статическая публикация
+
+Frontend можно разместить по адресу `https://<владелец>.github.io/MusicStream/`.
+FastAPI остаётся локальным: GitHub Pages не запускает Python и не публикует
+backend. Локальный `/app` по-прежнему использует API своего сервера.
+
+### Сборка и проверка локально
+
+Сборка использует только стандартную библиотеку Python, без Node.js/npm:
+
+```powershell
+cd E:\MusicStream
+uv run python scripts/build_pages.py
+uv run python -m http.server 8080 --bind 127.0.0.1 --directory dist
+```
+
+Откройте `http://127.0.0.1:8080/pages/`. Все ссылки на ресурсы в сборке
+относительные, поэтому они работают и под `/MusicStream/` на GitHub Pages.
+Каталог `dist/pages` должен отсутствовать или быть пустым до сборки.
+Повторная сборка в непустой каталог завершается ошибкой без удаления файлов;
+можно выбрать новый каталог через `--output dist/pages-preview`.
+
+В Pages-артефакт попадают **только** `index.html`, `style.css`, `app.js`,
+сгенерированный `config.js` и `.nojekyll`. Python, тесты, `.env`, `.venv`,
+ключи, конфигурация сервера и Git-история в этот артефакт не включаются.
+Исходники провайдеров могут стать видимыми отдельно, если сам репозиторий
+сделать публичным; это не то же самое, что содержимое Pages.
+
+### Настройка в GitHub
+
+После проверки изменений и вашего разрешения на коммит и push в `master`:
+
+1. Для бесплатного Pages на GitHub Free репозиторий должен быть публичным.
+   До смены видимости проверьте отчёт по секретам и личным данным.
+2. Откройте репозиторий **MusicStream → Settings → Pages**.
+3. В **Build and deployment → Source** выберите **GitHub Actions**.
+4. Откройте **Actions → Publish static frontend to GitHub Pages** и запустите
+   **Run workflow** для `master`. Workflow также запускается при push в `master`
+   с изменениями frontend, сборщика или самого workflow.
+5. Если GitHub запросит настройку environment `github-pages`, разрешите
+   развёртывания из `master`. Дождитесь успешных jobs `build` и `deploy`.
+6. Откройте адрес, показанный в deployment; ожидаемый путь — `/MusicStream/`.
+
+До настройки backend **не задавайте** переменную `MUSICSTREAM_API_BASE_URL`.
+Сборка по умолчанию включает явный **демонстрационный режим**: поиск
+отключён, запросов к API нет, вымышленные композиции не показываются.
+Оформление и недоступная панель плеера доступны для просмотра.
+Демонстрационный режим также включается, если конфигурация браузера не загрузилась.
+
+### Публичная конфигурация API (для будущего подключения)
+
+`src/musicstream/static/config.js` — конфигурация локального `/app`:
+`apiBaseUrl: ""`, `demoMode: false` означает API на том же origin.
+Сборщик не копирует этот файл: он создаёт отдельную конфигурацию Pages.
+Никакой зависимости от `127.0.0.1:8000` в коде frontend нет.
+
+Когда внешний HTTPS-backend будет отдельно настроен, укажите **публичный
+адрес нашего backend** в **Settings → Secrets and variables → Actions →
+Variables → New repository variable**, имя `MUSICSTREAM_API_BASE_URL`.
+Используйте корневой адрес, например `https://backend.example.invalid`,
+без `/api/search`, логина, пароля, токенов, query и fragment. Затем снова
+запустите workflow. Приложение добавляет `/api/search` к этому адресу.
+Адрес в `config.js` доступен всем посетителям — **это не место для секретов**.
+
+Эквивалентная локальная сборка:
+
+```powershell
+uv run python scripts/build_pages.py --output dist/pages-api-preview --api-base-url https://backend.example.invalid
+```
+
+В будущем backend должен разрешать CORS для точного origin Pages
+`https://<владелец>.github.io` (без `/MusicStream/`). HTTPS нужен для исключения
+mixed content. В этой задаче CORS и туннель не подключаются, FastAPI не
+открывается наружу. Браузер не обращается напрямую к поисковым API Deezer
+или MusicBrainz: каталог доступен только через наш backend.
+
+### Проверки и безопасность репозитория
+
+```powershell
+uv run pytest -q
+git status --short
+git ls-files
+```
+
+Тесты проверяют allowlist сборки, демоконфигурацию, относительные ссылки
+под `/MusicStream/`, отклонение небезопасных адресов API, запуск сборщика из
+другой папки и сохранение `/app`. `.gitignore` исключает `.env`, виртуальное
+окружение, ключи, приватные конфигурации, кэши и `dist/`.
+Ignore-правила не удаляют файлы, уже попавшие в Git или его историю.
+
+Перед публичностью учитывайте личные данные: в `pyproject.toml` указан
+авторский email, а коммиты содержат метаданные автора. Публикация репозитория
+раскрывает их. Историю Git автоматически не переписываем. Если когда-либо
+обнаружится настоящий секрет в истории, сначала его отзовите/замените,
+затем отдельно согласуйте очистку истории.
+
+Справка: [GitHub Pages с пользовательским workflow](https://docs.github.com/en/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages).

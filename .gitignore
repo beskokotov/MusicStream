@@ -8,3 +8,23 @@ wheels/
 
 # Virtual environments
 .venv
+
+# Local configuration, credentials, and private tooling
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+.aws/
+.codex/
+.agents/
+
+# Test and tool caches / local logs
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+*.log

@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#0c1011">
+  <meta name="referrer" content="strict-origin-when-cross-origin">
   <meta name="description" content="MusicStream — найдите музыку по названию, исполнителю или альбому.">
   <title>MusicStream — поиск музыки</title>
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%233bd6a0'/%3E%3Cpath d='M10 23v-6m7 12V11m7 15V14m7 9v-6' stroke='%230c1011' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -55,17 +56,32 @@
       <p id="search-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
       <div id="results-region" aria-busy="false">
         <div id="empty-state" class="empty-state"><div id="state-icon" class="state-icon"><svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg><span class="spinner" aria-hidden="true"></span></div><h3 id="state-title">Что звучит у вас в голове?</h3><p id="state-description">Введите название трека или имя исполнителя.<br>Ваша следующая находка — всего в одном поиске.</p><button id="retry-button" type="button" class="retry-button" hidden>Попробовать снова</button></div>
-        <div id="track-table" hidden><div class="table-head" aria-hidden="true"><span>#</span><span>Композиция</span><span>Альбом</span><svg class="icon"><use href="#i-clock"/></svg></div><ol id="track-list" class="track-list" aria-label="Найденные композиции"></ol><p class="results-note">Нажмите на название, чтобы показать композицию в нижней панели. Воспроизведение пока недоступно.</p></div>
+        <div id="track-table" hidden><div class="table-head" aria-hidden="true"><span>#</span><span>Композиция</span><span>Альбом</span><svg class="icon"><use href="#i-clock"/></svg></div><ol id="track-list" class="track-list" aria-label="Найденные композиции"></ol><p class="results-note">Выберите композицию: MusicStream попробует подобрать источник. При неоднозначном совпадении выберите запись; затем нажмите Play.</p></div>
       </div>
     </section>
+    <section id="playback-section" class="playback-section" aria-labelledby="playback-heading" hidden>
+      <div class="section-heading"><h2 id="playback-heading">Источник воспроизведения</h2><span>YouTube / Hitmos</span></div>
+      <p id="source-status" role="status" aria-live="polite">Выберите источник.</p>
+      <label class="youtube-consent"><input id="youtube-consent" type="checkbox"> Разрешаю подключение YouTube: передать выбранные название и исполнителя для поиска и загрузить видимый плеер. При использовании YouTube я принимаю его условия.</label>
+      <div class="source-actions"><label>Источник <select id="audio-source"><option value="auto">Автоподбор</option><option value="hitmos">Hitmos</option><option value="youtube">YouTube</option></select></label><button id="resolve-source" type="button">Найти источник</button><a id="youtube-search-link" target="_blank" rel="noopener noreferrer">Открыть поиск YouTube ↗</a><a id="hitmos-search-link" target="_blank" rel="noopener noreferrer" hidden>Открыть поиск Hitmos ↗</a></div>
+      <div id="source-reports" aria-live="polite"></div>
+      <div id="source-candidates" class="source-candidates"></div>
+      <details id="source-diagnostics" hidden><summary>Диагностика источника · локальная разработка</summary><p>Статус редиректа относится к выдаче адреса источником, а не к загрузке аудио CDN. MediaError не сообщает точный HTTP-статус CDN.</p><pre id="source-diagnostics-data"></pre></details>
+      <details id="youtube-advanced"><summary>Дополнительно / YouTube</summary><form id="youtube-manual-form"><label for="youtube-url">Уже нашли видео? Вставьте ссылку YouTube или ID</label><div class="manual-input"><input id="youtube-url" type="text" maxlength="300" placeholder="https://www.youtube.com/watch?v=…" autocomplete="off"><button type="submit">Загрузить видео YouTube</button></div><small>Видео выбираете вы; соответствие записи Deezer при ручном выборе не проверено.</small></form></details>
+      <p><a id="youtube-video-link" target="_blank" rel="noopener noreferrer" hidden>Открыть выбранное видео на YouTube ↗</a></p>
+      <details id="hitmos-advanced"><summary>Дополнительно / Диагностика</summary><form id="hitmos-manual-form" hidden><label for="hitmos-url">Выбрали запись на Hitmos? Вставьте ссылку /song/… или ID</label><div class="manual-input"><input id="hitmos-url" type="text" maxlength="200" autocomplete="off" placeholder="https://ru.hitmox.org/song/…"><button type="submit">Проверить запись Hitmos</button></div><small>После проверки доступного потока можно попробовать встроенный плеер; при отказе остаётся переход на Hitmos.</small><p><a id="hitmos-song-link" target="_blank" rel="noopener noreferrer" hidden>Открыть выбранную запись на Hitmos ↗</a></p></form></details>
+      <audio id="hitmos-audio" controls preload="none" hidden aria-label="Аудиоплеер Hitmos"></audio>
+      <div id="youtube-frame-area" class="youtube-frame-area" hidden></div>
+    </section>
+    <details id="youtube-policy" class="youtube-policy"><summary>YouTube: условия и конфиденциальность</summary><p>MusicStream использует YouTube API Services. Для поиска выбранные название и исполнитель передаются через наш backend Google. При загрузке плеера браузер подключается к YouTube, который получает IP-адрес и может использовать cookies и показывать рекламу. Вход в аккаунт и просмотр регулирует YouTube. MusicStream не скачивает видео или аудио, не создаёт библиотеку и не сохраняет результаты YouTube; параметры запросов могут попадать в журнал backend. Снимите согласие, чтобы остановить и удалить плеер.</p><p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer">Условия YouTube</a> · <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Политика конфиденциальности Google</a></p></details>
     <footer class="page-footer"><span>Музыка объединяет.</span><span>Метаданные и обложки · Deezer</span></footer>
     <noscript><p class="noscript">Для поиска включите JavaScript в браузере.</p></noscript>
   </main>
 
-  <footer class="player" aria-label="Будущий музыкальный плеер">
+  <footer class="player" aria-label="Музыкальный плеер">
     <div class="player-track"><div id="player-cover" class="cover player-cover"><svg class="icon" aria-hidden="true"><use href="#i-note"/></svg></div><div class="player-track-text"><div id="player-title" class="player-title">Здесь будет ваша музыка</div><div id="player-artist" class="player-artist">Выберите композицию из поиска</div></div></div>
-    <div class="player-center"><div class="player-controls"><button type="button" disabled aria-label="Предыдущая композиция — недоступно"><svg class="icon previous"><use href="#i-next"/></svg></button><button type="button" class="play-button" disabled aria-label="Воспроизведение пока недоступно"><svg class="icon"><use href="#i-play"/></svg></button><button type="button" disabled aria-label="Следующая композиция — недоступно"><svg class="icon"><use href="#i-next"/></svg></button></div><div class="progress"><span>—:—</span><div class="progress-track" role="progressbar" aria-label="Воспроизведение недоступно" aria-disabled="true" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"></div><span id="player-duration">—:—</span></div></div>
-    <div class="player-unavailable"><span class="unavailable-dot"></span>Воспроизведение<br> пока недоступно</div>
+    <div class="player-center"><div class="player-controls"><button type="button" disabled aria-label="Предыдущая композиция — недоступно"><svg class="icon previous"><use href="#i-next"/></svg></button><button id="player-play" type="button" class="play-button" disabled aria-label="Воспроизвести видео YouTube"><svg class="icon"><use href="#i-play"/></svg></button><button type="button" disabled aria-label="Следующая композиция — недоступно"><svg class="icon"><use href="#i-next"/></svg></button></div><div class="progress"><span id="player-time">—:—</span><input id="player-seek" class="progress-track" type="range" min="0" max="1" value="0" step="1" disabled aria-label="Позиция воспроизведения"><span id="player-duration">—:—</span></div></div>
+    <div class="player-volume"><label for="player-volume">Громкость</label><input id="player-volume" type="range" min="0" max="100" value="60" disabled><span id="playback-state">Выберите источник</span></div>
   </footer>
 
   <template id="track-template"><li class="track-row"><span class="track-number"></span><div class="track-main"><div class="cover track-cover"><svg class="icon" aria-hidden="true"><use href="#i-note"/></svg></div><div class="track-info"><button class="track-title" type="button"></button><span class="track-artist"></span></div></div><span class="track-album"></span><span class="track-duration"></span></li></template>

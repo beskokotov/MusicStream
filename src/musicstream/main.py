@@ -24,18 +24,59 @@ async def lifespan(app: FastAPI):
             from musicstream.torrent.http import TorrentPlaybackRegistry
             from musicstream.torrent.session import TorrentSessionManager
 
+            network_mode = os.getenv("MUSICSTREAM_TORRENT_NETWORK_MODE", "loopback")
+            if network_mode == "remote_tcp":
+                raw_peers = json.loads(os.environ["MUSICSTREAM_TORRENT_REMOTE_PEERS"])
+                if not isinstance(raw_peers, list) or not raw_peers:
+                    raise ValueError("Remote mode requires explicit peers")
+                peers = tuple(tuple(item) for item in raw_peers)
+            elif network_mode in ("public_discovery", "safe_webseed"):
+                peers = ()
+            elif network_mode == "loopback":
+                peer_port = os.getenv("MUSICSTREAM_TORRENT_HTTP_PEER_PORT")
+                peers = (("127.0.0.1", int(peer_port)),) if peer_port else ()
+            else:
+                raise ValueError("Invalid BitTorrent network mode")
+            connect_timeout = int(os.getenv("MUSICSTREAM_TORRENT_PEER_CONNECT_TIMEOUT", "8"))
+            public_hashes = frozenset()
+            if network_mode in ("public_discovery", "safe_webseed"):
+                raw_hashes = json.loads(os.environ["MUSICSTREAM_TORRENT_PUBLIC_APPROVED_INFO_HASHES"])
+                if not isinstance(raw_hashes, list) or any(not isinstance(value, str) for value in raw_hashes):
+                    raise ValueError("Approved public info hashes must be a JSON array of strings")
+                public_hashes = frozenset(value.lower() for value in raw_hashes)
+            if network_mode == "safe_webseed":
+                from musicstream.torrent.safe_webseed_stream import SafeWebSeedManager
+
+                manager = SafeWebSeedManager(approved_info_hashes=public_hashes)
+            else:
+                manager = TorrentSessionManager(
+                    max_sessions=1, max_connections=4 if network_mode != "loopback" else 8,
+                    network_mode=network_mode, peer_connect_timeout_seconds=connect_timeout,
+                    approved_public_info_hashes=public_hashes,
+                    public_bind_ip=os.getenv("MUSICSTREAM_TORRENT_PUBLIC_BIND_IP")
+                    if network_mode == "public_discovery" else None,
+                )
+            if TORRENT_AUTO_ENABLED and not peers and network_mode not in ("public_discovery", "safe_webseed"):
+                raise ValueError("Automatic Play requires an explicit peer")
+            if peers:
+                manager.validate_peers(peers)
+            default_read_timeout = "45" if network_mode == "safe_webseed" else \
+                "30" if network_mode == "public_discovery" else \
+                "20" if network_mode == "remote_tcp" else "5"
+            read_timeout = float(os.getenv("MUSICSTREAM_TORRENT_AUTO_READ_TIMEOUT", default_read_timeout))
+            if not 1 <= read_timeout <= 60:
+                raise ValueError("Range read timeout must be 1-60 seconds")
             registry = TorrentPlaybackRegistry(
-                TorrentSessionManager(max_sessions=1), max_streams=1,
-                read_timeout_seconds=float(os.getenv("MUSICSTREAM_TORRENT_AUTO_READ_TIMEOUT", "5")),
-            ) if TORRENT_AUTO_ENABLED else TorrentPlaybackRegistry()
+                manager, max_streams=1 if TORRENT_AUTO_ENABLED else 2,
+                read_timeout_seconds=read_timeout,
+            )
             auto = None
             prowlarr_client = None
             source = os.getenv("MUSICSTREAM_TORRENT_HTTP_SOURCE")
-            port = os.getenv("MUSICSTREAM_TORRENT_HTTP_PEER_PORT")
             indexes = os.getenv("MUSICSTREAM_TORRENT_HTTP_FILE_INDEXES", "")
-            if source and port and indexes:
+            if source and indexes and (peers or network_mode in ("public_discovery", "safe_webseed")):
                 for index in (int(value.strip()) for value in indexes.split(",")):
-                    registry.register(f"track-{index}", source, index, peers=(("127.0.0.1", int(port)),))
+                    registry.register(f"track-{index}", source, index, peers=peers)
             registry.start()
             app.state.torrent_registry = registry
             try:
@@ -48,8 +89,6 @@ async def lifespan(app: FastAPI):
                     from musicstream.torrent.metadata_resolver import TorrentMetadataResolver
                     from musicstream.torrent.prowlarr_discovery import ProwlarrDiscoveryProvider
 
-                    peer_port = int(os.environ["MUSICSTREAM_TORRENT_HTTP_PEER_PORT"])
-                    peers = (("127.0.0.1", peer_port),)
                     owned_source = os.getenv("MUSICSTREAM_TORRENT_AUTO_TEST_SOURCE")
                     if owned_source:
                         search = resolver = OwnedTorrentSource(Path(owned_source))

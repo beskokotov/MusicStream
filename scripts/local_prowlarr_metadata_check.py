@@ -116,7 +116,7 @@ async def run(base_url: str, key: str, indexer_id: int):
 
 
 def main():
-    config = Path(os.environ["TEMP"]) / "MusicStream-Prowlarr-local" / "data" / "config.xml"
+    config = Path(os.environ["LOCALAPPDATA"]) / "MusicStream" / "Prowlarr" / "data" / "config.xml"
     key = ElementTree.parse(config).getroot().findtext("ApiKey")
     base_url = "http://127.0.0.1:18746"
     with tempfile.TemporaryDirectory(prefix="musicstream-own-torrent-") as directory:

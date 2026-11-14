@@ -53,6 +53,14 @@ def test_missing_duplicate_versions_and_album_image():
     assert match_track(ref, metadata("Mutter.cue", "cover.jpg", "rip.log")).status == "missing"
 
 
+def test_archive_underscore_artist_prefix_and_numbered_alternate():
+    files = metadata("amp021/1_piscis_nocturnal.mp3",
+                     "amp021/4_piscis_nocturnal_2.mp3",
+                     "amp021/cover.jpg")
+    result = match_track(TrackReference("Piscis", "Nocturnal", "Nocturnal"), files)
+    assert result.status == "matched" and result.file_index == 0
+
+
 def test_release_ranking_requires_verified_track_and_clear_winner():
     ref = TrackReference("Rammstein", "Sonne", "Mutter")
     mp3 = release("Rammstein - Mutter (2001) MP3", "mp3", 3)

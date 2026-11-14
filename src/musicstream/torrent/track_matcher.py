@@ -72,7 +72,7 @@ def _track_name(file: TorrentFile, artists: tuple[str, ...]) -> str:
     stem = re.sub(r"^\s*\d{1,3}\s*[-._ ]+", "", stem)
     for artist in artists:
         # Strip a prefix only at a separator, so similar track words survive.
-        pattern = r"^\s*" + re.escape(artist) + r"\s*[-–—]\s*"
+        pattern = r"^\s*" + re.escape(artist) + r"\s*[-–—_]\s*"
         stem = re.sub(pattern, "", stem, flags=re.I)
     parts = re.split(r"\s+[-–—]\s+", stem, maxsplit=1)
     if len(parts) == 2 and any(similarity(parts[0], artist) >= 0.90 for artist in artists):
@@ -110,6 +110,10 @@ def match_track(reference: TrackReference, metadata: TorrentMetadata,
                             (normalize(reference.album) in file_path or
                              _latin(reference.album) in _latin(file.path)))
         version_penalty = 0.24 if _version_terms(reference.title) != _version_terms(stem) else 0
+        # Archive-style names may use a trailing _2 for an alternate take.
+        # Do not let that near-match tie the plain title.
+        if re.search(r"(?:_|[-\s])\d+$", stem) and not re.search(r"\d+$", reference.title.strip()):
+            version_penalty += 0.15
         score = min(1.0, 0.80 * title_score + 0.09 * artist_score +
                     0.06 * album_score + (0.05 if file.extension.lower() == ".mp3" else 0.02)
                     - version_penalty)

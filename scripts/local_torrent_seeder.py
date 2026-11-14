@@ -1,9 +1,10 @@
-"""Prepare and seed a local MP3 folder on loopback for manual HTTP Range checks."""
+"""Prepare and seed owned MP3 files on an explicitly selected local address."""
 
 from __future__ import annotations
 
 import argparse
 import hashlib
+import ipaddress
 import time
 from pathlib import Path
 
@@ -56,7 +57,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("directory", type=Path)
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--bind", default="127.0.0.1", help="Local IP address (default: loopback)")
+    parser.add_argument("--port", type=int, default=0, help="TCP listen port (default: random)")
     args = parser.parse_args()
+    address = ipaddress.ip_address(args.bind)
+    if address.is_unspecified or address.is_multicast or address.is_link_local:
+        parser.error("--bind must be an explicit local unicast IP address")
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
+    listen_host = f"[{address}]" if address.version == 6 else str(address)
     directory = args.directory.resolve()
     torrent_path, files = prepare(directory)
     print(f"Torrent: {torrent_path}", flush=True)
@@ -66,19 +75,22 @@ def main() -> None:
         return
 
     session = lt.session({
-        "listen_interfaces": "127.0.0.1:0", "enable_dht": False,
+        "listen_interfaces": f"{listen_host}:{args.port}", "enable_dht": False,
         "enable_upnp": False, "enable_natpmp": False, "enable_lsd": False,
+        "enable_outgoing_utp": False, "enable_incoming_utp": False,
         "connections_limit": 4,
     })
     params = lt.add_torrent_params()
     params.ti = lt.torrent_info(str(torrent_path))
     params.save_path = str(directory.parent)
-    params.flags |= lt.torrent_flags.seed_mode | lt.torrent_flags.override_trackers
+    params.flags |= (lt.torrent_flags.seed_mode | lt.torrent_flags.override_trackers |
+                     lt.torrent_flags.disable_pex | lt.torrent_flags.disable_dht |
+                     lt.torrent_flags.disable_lsd)
     params.trackers = []
     handle = session.add_torrent(params)
     while session.listen_port() == 0:
         time.sleep(0.05)
-    print(f"Loopback peer port: {session.listen_port()}", flush=True)
+    print(f"Peer address: {address}:{session.listen_port()}", flush=True)
     print("Keep this process running; press Ctrl+C to stop.", flush=True)
     try:
         while True:

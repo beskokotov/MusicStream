@@ -93,9 +93,9 @@ class AutoTorrentPlayback:
     def __init__(self, search: SearchSource, resolver: MetadataSource,
                  registry: TorrentPlaybackRegistry, *, peers: tuple[tuple[str, int], ...],
                  max_candidates: int = 5, first_bytes: int = 4096):
-        if not peers or any(host not in ("127.0.0.1", "::1") or not 1 <= port <= 65535
-                            for host, port in peers):
-            raise ValueError("Explicit loopback peers are required")
+        if not peers and registry.manager.network_mode not in ("public_discovery", "safe_webseed"):
+            raise ValueError("An explicit peer is required")
+        registry.manager.validate_peers(peers)
         if not 1 <= max_candidates <= 10 or not 1 <= first_bytes <= 65536:
             raise ValueError("Invalid preparation limits")
         self.search = search
@@ -153,6 +153,22 @@ class AutoTorrentPlayback:
                     path = Path(self._temporary.name) / f"{token}.torrent"
                     path.write_bytes(resolved.torrent_bytes)
                     job.torrent_path = path
+                    if self.registry.manager.network_mode == "safe_webseed":
+                        from .safe_webseed import SafeWebSeedFetcher, UnsafeWebSeedError
+
+                        try:
+                            if inspect_torrent(path) != resolved.metadata:
+                                await self._discard_playback(job)
+                                continue
+                            approved = SafeWebSeedFetcher(
+                                path,
+                                approved_info_hashes=self.registry.manager.approved_info_hashes,
+                                archive_item=self.registry.manager.archive_item,
+                            )
+                        except (ValueError, UnsafeWebSeedError):
+                            await self._discard_playback(job)
+                            continue
+                        approved.close()
                     job.playback_id = token
                     self.registry.register(token, path, matched.file_index, peers=self.peers)
                     job.status = "buffering"

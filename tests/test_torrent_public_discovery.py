@@ -3,6 +3,11 @@
 import asyncio
 import hashlib
 import importlib
+import ipaddress
+import socket
+import struct
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,6 +55,10 @@ def test_public_discovery_is_explicit_and_bounded(tmp_path):
     assert options["enable_natpmp"] is False
     assert options["enable_incoming_tcp"] is False
     assert options["enable_incoming_utp"] is False
+    assert options["enable_outgoing_utp"] is True
+    assert options["enable_outgoing_tcp"] is True
+    assert options["max_failcount"] == 4
+    assert options["max_peerlist_size"] == 64
     assert options["connections_limit"] == 4
     assert options["disable_hash_checks"] is False
     assert manager.active_sessions == 0
@@ -166,7 +175,7 @@ def test_public_trackers_and_safe_diagnostics_without_network(tmp_path, monkeypa
             assert session.params.trackers == ["https://tracker.example/announce"]
             assert not session.params.flags & lt.torrent_flags.override_trackers
             assert not session.params.flags & lt.torrent_flags.disable_dht
-            assert session.params.flags & lt.torrent_flags.disable_pex
+            assert not session.params.flags & lt.torrent_flags.disable_pex
             assert session.params.file_priorities == [1]
             assert await transfer.read_range(0, 512) == payload[:512]
             counters = transfer.diagnostics()
@@ -177,6 +186,7 @@ def test_public_trackers_and_safe_diagnostics_without_network(tmp_path, monkeypa
             assert counters.first_audio_fragment_seconds is not None
             assert counters.first_audio_fragment_seconds >= 0
             assert counters.connected_seeds == 1
+            assert counters.verified_requested_pieces == 1
             assert counters.listen_port == 43821
             assert counters.no_transfer_reason is None
             assert not hasattr(counters, "peer_addresses")
@@ -201,7 +211,91 @@ def test_public_fastapi_start_is_lazy(tmp_path, monkeypatch):
     async def run():
         async with main.lifespan(main.app):
             assert main.app.state.torrent_registry.manager.network_mode == "public_discovery"
+            assert main.app.state.torrent_registry.manager.max_connections == 12
             assert main.app.state.torrent_registry.manager.active_sessions == 0
             assert main.app.state.torrent_auto.peers == ()
 
     asyncio.run(run())
+
+
+def test_public_mode_tracker_to_owned_local_peer(tmp_path, monkeypatch):
+    """Exercise tracker discovery and verified pieces without a public torrent."""
+    try:
+        probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        probe.connect(("192.0.2.1", 9))  # Route lookup; UDP sends no datagram.
+        bind_ip = probe.getsockname()[0]
+        probe.close()
+        if ipaddress.ip_address(bind_ip).is_loopback:
+            pytest.skip("No non-loopback IPv4 route")
+    except OSError:
+        pytest.skip("No non-loopback IPv4 route")
+
+    payload = b"ID3" + b"o" * (16384 - 3)
+    source = tmp_path / "seed"
+    source.mkdir()
+    (source / "owned.mp3").write_bytes(payload)
+    seeder = lt.session({"listen_interfaces": f"{bind_ip}:0", "enable_dht": False,
+                         "enable_upnp": False, "enable_natpmp": False, "enable_lsd": False})
+    tracker_port = {"seed": 0}
+
+    class Tracker(BaseHTTPRequestHandler):
+        def do_GET(self):
+            peers = socket.inet_aton(bind_ip) + struct.pack(">H", tracker_port["seed"])
+            body = lt.bencode({b"interval": 60, b"complete": 1,
+                               b"incomplete": 0, b"peers": peers})
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    tracker = ThreadingHTTPServer((bind_ip, 0), Tracker)
+    thread = threading.Thread(target=tracker.serve_forever, daemon=True)
+    thread.start()
+    info = {b"name": b"owned.mp3", b"piece length": 16384,
+            b"length": len(payload), b"pieces": hashlib.sha1(payload).digest()}
+    torrent = tmp_path / "owned.torrent"
+    torrent.write_bytes(lt.bencode({b"announce":
+                                    f"http://{bind_ip}:{tracker.server_port}/announce".encode(),
+                                    b"info": info}))
+    params = lt.add_torrent_params()
+    params.ti = lt.torrent_info(str(torrent))
+    params.save_path = str(source)
+    params.flags |= lt.torrent_flags.seed_mode | lt.torrent_flags.override_trackers
+    params.trackers = []
+    handle = seeder.add_torrent(params)
+    tracker_port["seed"] = seeder.listen_port()
+    assert tracker_port["seed"] > 0
+    manager = TorrentSessionManager(settings=TorrentSettings(tmp_path / "cache", 65536),
+                                    max_sessions=1, max_connections=4,
+                                    network_mode="public_discovery", public_bind_ip=bind_ip,
+                                    approved_public_info_hashes=frozenset({str(params.ti.info_hashes().v1)}))
+    normal_options = manager.session_options
+
+    def local_options():
+        options = normal_options()
+        options["enable_dht"] = False  # Keep this fixture entirely local.
+        return options
+
+    monkeypatch.setattr(manager, "session_options", local_options)
+
+    async def run():
+        async with manager.open_torrent(torrent, 0) as transfer:
+            assert await transfer.read_range(0, 1024, timeout_seconds=12) == payload[:1024]
+            diagnostics = transfer.diagnostics()
+            assert diagnostics.tracker_replies >= 1
+            assert diagnostics.downloaded_payload_bytes >= len(payload)
+            assert diagnostics.verified_piece_bytes == len(payload)
+            assert diagnostics.first_audio_fragment_seconds is not None
+        assert manager.active_sessions == 0
+
+    try:
+        asyncio.run(run())
+    finally:
+        tracker.shutdown()
+        tracker.server_close()
+        thread.join(timeout=2)
+        seeder.pause()
+        seeder.remove_torrent(handle)

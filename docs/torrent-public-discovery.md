@@ -3,8 +3,9 @@
 `public_discovery` is an experimental, opt-in BitTorrent mode. Normal FastAPI
 startup and the existing `loopback` and `remote_tcp` modes are unchanged. This
 mode uses trackers embedded in an approved `.torrent` and libtorrent DHT to find
-peers. It does not require manually entering a peer IP. PEX, local service
-discovery, UPnP, NAT-PMP, web seeds, and incoming peer connections remain off.
+peers. It does not require manually entering a peer IP. Public PEX and outgoing
+TCP/uTP are enabled. Local service discovery, UPnP, NAT-PMP, web seeds, and
+incoming peer connections remain off.
 To use DHT and UDP trackers, libtorrent binds an ephemeral UDP port on the
 selected local interface; no Windows firewall or router settings are changed.
 On a computer with multiple adapters, set `MUSICSTREAM_TORRENT_PUBLIC_BIND_IP`
@@ -45,9 +46,9 @@ Prowlarr path still needs its separate approved source IDs and indexer IDs.
 Public mode adds an info-hash allowlist on top of those checks.
 
 The default first-range wait is 30 seconds (`MUSICSTREAM_TORRENT_AUTO_READ_TIMEOUT`,
-allowed 1-60). Connection and handshake timeout defaults to 8 seconds
+allowed 1-60). Connection and handshake timeout defaults to 12 seconds
 (`MUSICSTREAM_TORRENT_PEER_CONNECT_TIMEOUT`, allowed 2-30). The session permits
-four connections and one concurrent torrent in the app. The selected file and
+12 connections and one concurrent torrent in the app. The selected file and
 requested pieces retain priority; data is returned only after piece hash
 verification. Disk cache defaults to 16 MiB and can be changed with
 `MUSICSTREAM_TORRENT_CACHE_MAX_BYTES`; temporary files are removed on close.
@@ -57,7 +58,8 @@ while a transfer is active. It returns peer-list count, connected-peer count,
 tracker replies and errors, DHT nodes and bootstrap status, connected seeds,
 completed peer handshakes, requested-piece availability, peers choking that
 piece, downloaded payload bytes, verified requested-piece bytes, and seconds
-from the first range request to its first ready audio fragment. It returns no IP
+from the first range request to its first ready audio fragment, discovered seeds,
+verified requested-piece count, and current payload rate. It returns no IP
 addresses, torrent URLs, tracker names, credentials, or file paths. No HTTP
 diagnostic route or player UI was added.
 

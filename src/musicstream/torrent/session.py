@@ -52,6 +52,9 @@ class TorrentDiagnostics:
     dropped_requests: int = 0
     sent_block_requests: int = 0
     handshake_pending_peers: int = 0
+    discovered_seeds: int = 0
+    download_payload_rate_bytes_per_second: int = 0
+    verified_requested_pieces: int = 0
 
 
 class TorrentSessionManager:
@@ -147,6 +150,12 @@ class TorrentSessionManager:
             })
         if self.network_mode == "public_discovery":
             lt = _libtorrent()
+            # Public swarms may advertise uTP-only peers. Incoming connections
+            # remain disabled; no router or firewall rule is requested.
+            settings["enable_outgoing_utp"] = True
+            settings["max_failcount"] = 4
+            settings["max_peerlist_size"] = 64
+            settings["connection_speed"] = min(self.max_connections, 8)
             settings["outgoing_interfaces"] = self.public_bind_ip
             settings["alert_mask"] = (lt.alert.category_t.tracker_notification |
                                       lt.alert.category_t.dht_notification |
@@ -242,13 +251,14 @@ class SelectedTorrent:
             params.file_priorities = [1 if i == self.file_index else 0
                                       for i in range(self._storage.num_files())]
             params.flags |= (lt.torrent_flags.override_web_seeds |
-                             lt.torrent_flags.disable_pex |
                              lt.torrent_flags.disable_lsd |
                              lt.torrent_flags.default_dont_download)
             if self.manager.network_mode == "public_discovery":
-                params.flags &= ~(lt.torrent_flags.override_trackers | lt.torrent_flags.disable_dht)
+                params.flags &= ~(lt.torrent_flags.override_trackers |
+                                  lt.torrent_flags.disable_dht | lt.torrent_flags.disable_pex)
             else:
-                params.flags |= lt.torrent_flags.override_trackers | lt.torrent_flags.disable_dht
+                params.flags |= (lt.torrent_flags.override_trackers |
+                                 lt.torrent_flags.disable_dht | lt.torrent_flags.disable_pex)
                 params.trackers = []
             params.flags &= ~(lt.torrent_flags.auto_managed | lt.torrent_flags.paused)
             params.url_seeds = []
@@ -404,6 +414,9 @@ class SelectedTorrent:
             dropped_requests=self._dropped_requests,
             sent_block_requests=self._sent_block_requests,
             handshake_pending_peers=pending_handshakes,
+            discovered_seeds=max(0, getattr(status, "list_seeds", 0)),
+            download_payload_rate_bytes_per_second=max(0, getattr(status, "download_payload_rate", 0)),
+            verified_requested_pieces=len(self._verified_pieces),
         )
 
     async def read_range(self, start: int, end: int, *, timeout_seconds: float = 10) -> bytes:

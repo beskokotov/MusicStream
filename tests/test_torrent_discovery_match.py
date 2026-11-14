@@ -76,13 +76,54 @@ def test_release_ranking_requires_verified_track_and_clear_winner():
     assert tied.release is None and tied.reason == "ambiguous_releases"
 
 
+@pytest.mark.parametrize("first_seeds,second_seeds,expected", [
+    (8, 3, "first"), (0, 5, "second"),
+])
+def test_equal_recording_prefers_more_seeders(first_seeds, second_seeds, expected):
+    ref = TrackReference("Artist", "Song", "Album")
+    first = release("Artist - Album MP3", "first", first_seeds)
+    second = release("Artist - Album MP3", "second", second_seeds)
+    files = metadata("Artist/Album/01 - Song.mp3")
+    result = rank_releases(ref, (first, second), {"first": files, "second": files})
+    assert result.release.source_id == expected
+
+
+def test_seeders_outweigh_other_peers_and_live_version_is_rejected():
+    ref = TrackReference("Artist", "Song", "Album")
+    zero = release("Artist - Album FLAC", "zero", 0)
+    four = release("Artist - Album FLAC", "four", 4)
+    live = release("Artist - Album Live FLAC", "live", 30)
+    from dataclasses import replace
+    zero = replace(zero, peers=20)
+    files = metadata("Artist/Album/01 - Song.flac")
+    result = rank_releases(ref, (zero, four, live),
+                           {item.source_id: files for item in (zero, four, live)})
+    assert result.release == four
+    assert result.file_index == 0
+    assert rank_releases(ref, (live,), {"live": files}).release is None
+    studio = release("Artist - Album FLAC", "studio", 2)
+    assert rank_releases(ref, (live, studio), {"live": files, "studio": files}).release == studio
+
+
+def test_unknown_seeders_remain_eligible_and_ambiguous_track_is_rejected():
+    ref = TrackReference("Artist", "Song", "Album")
+    unknown = release("Artist - Album FLAC", "unknown", 0)
+    from dataclasses import replace
+    unknown = replace(unknown, seeders=None)
+    files = metadata("Artist/Album/01 - Song.flac")
+    assert rank_releases(ref, (unknown,), {"unknown": files}).release == unknown
+    duplicate = metadata("Artist/Album/01 - Song.mp3", "Artist/Album/01 - Song.flac")
+    assert rank_releases(ref, (unknown,), {"unknown": duplicate}).release is None
+
+
 def test_parse_prowlarr_result_removes_embedded_api_key():
     row = {"title": "Кино - Группа крови MP3", "guid": "https://example.test/42",
            "protocol": "torrent", "indexerId": 1, "indexer": "NoNaMe Club",
-           "size": 12345, "seeders": 7, "categories": [{"id": 3010, "name": "Audio/MP3"}],
+           "size": 12345, "seeders": 7, "peers": 12,
+           "categories": [{"id": 3010, "name": "Audio/MP3"}],
            "downloadUrl": "http://127.0.0.1:18746/1/download?apikey=secret&link=opaque"}
     hit, = parse_releases([row], base_url="http://127.0.0.1:18746")
-    assert (hit.title, hit.seeders, hit.category) == (row["title"], 7, ("Audio/MP3",))
+    assert (hit.title, hit.seeders, hit.peers, hit.category) == (row["title"], 7, 12, ("Audio/MP3",))
     assert "secret" not in hit.metadata_url and "link=opaque" in hit.metadata_url
     assert parse_releases([], base_url="http://127.0.0.1:18746") == ()
 

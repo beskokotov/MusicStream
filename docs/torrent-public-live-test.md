@@ -126,3 +126,32 @@ removed their temporary caches.
 These measurements concern P2P `public_discovery` only. A later, separate
 [safe HTTPS Web Seed playback test](torrent-safe-webseed-playback.md) obtained
 verified pieces and played `amp021` in Edge without any BitTorrent peers.
+
+## Outgoing uTP/PEX configuration and bounded follow-up
+
+The prior public configuration permitted outgoing TCP only, disabled PEX, and
+used four connection slots in the app. It also disabled all incoming peer
+connections. libtorrent 2.1.1.0 defaults to supporting outgoing uTP; the public
+mode now permits outgoing TCP and uTP plus PEX, while retaining the selected
+IPv4 interface, disabled incoming connections, disabled web seeds, hash checks,
+one concurrent torrent, and bounded memory and disk usage. The app allows up to
+12 connections in this opt-in mode. This removes three possible limitations;
+it does not prove they caused the earlier remote choke or handshake failures.
+
+An original MP3 with a local HTTP tracker and local seeder passed a public-mode
+test: the tracker provided the peer, a BitTorrent connection delivered a piece,
+and libtorrent verified it before returning the requested range. DHT was
+disabled only in this local fixture to avoid announcing test metadata outside
+the machine. This is a local transport check, not a remote P2P success.
+
+One follow-up on the previously approved `amp021` hash used the routed local
+IPv4 address, an empty temporary cache, no web seeds, 12 connection slots,
+and a single 16 KiB range request. It timed out after 45 seconds. The final
+sample occurred at about 50 seconds because diagnostics sampled every 5 seconds.
+It observed zero tracker replies, four tracker errors, zero DHT nodes, zero
+discovered or connected peers, zero payload bytes, and zero verified pieces.
+The selected local route matched the route to the Archive tracker; the tracker
+error code was not captured in this probe, so the immediate tracker failure
+cannot be assigned to a specific network or source condition. No peer reached
+handshake, interested, or block request state. The cache and session were
+removed. No remote BitTorrent audio or browser playback was obtained.

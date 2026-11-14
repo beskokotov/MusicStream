@@ -44,6 +44,7 @@ class MusicRelease:
     magnet_uri: str | None = None
     info_hash: str | None = None
     metadata_url: str | None = None
+    peers: int | None = None
 
 
 def _local_url(value: object, base_url: str) -> str | None:
@@ -89,6 +90,9 @@ def parse_releases(data: object, *, base_url: str) -> tuple[MusicRelease, ...]:
         seeds = row.get("seeders")
         if not isinstance(seeds, int) or isinstance(seeds, bool) or seeds < 0:
             seeds = None
+        peers = row.get("peers")
+        if not isinstance(peers, int) or isinstance(peers, bool) or peers < 0:
+            peers = None
         categories = row.get("categories")
         if not isinstance(categories, list):
             raise ProwlarrResponseError("Invalid Prowlarr categories")
@@ -110,6 +114,7 @@ def parse_releases(data: object, *, base_url: str) -> tuple[MusicRelease, ...]:
             info_url=_safe_identifier(info_url) if info_url else None,
             magnet_uri=magnet, info_hash=info_hash,
             metadata_url=_local_url(row.get("downloadUrl"), base_url),
+            peers=peers,
         ))
     return tuple(releases)
 

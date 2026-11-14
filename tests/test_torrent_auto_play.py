@@ -12,7 +12,7 @@ from musicstream.torrent.auto import (
     ApprovedProwlarrSource, AutoTorrentPlayback, OwnedTorrentSource, router as auto_router,
 )
 from musicstream.torrent.http import TorrentPlaybackRegistry, router as range_router
-from musicstream.torrent.metadata import TorrentFile, TorrentMetadata, TorrentSettings
+from musicstream.torrent.metadata import TorrentFile, TorrentMetadata, TorrentSettings, inspect_torrent
 from musicstream.torrent.metadata_resolver import MetadataResolution
 from musicstream.torrent.prowlarr_discovery import MusicRelease
 from musicstream.torrent.session import TorrentSessionManager
@@ -106,7 +106,7 @@ def test_unavailable_peers_and_cancellation(local_swarm, tmp_path):
     assert list((tmp_path / "cache").iterdir()) == []
 
 
-@pytest.mark.parametrize("first_status", ["missing", "error", "weak"])
+@pytest.mark.parametrize("first_status", ["missing", "error", "weak", "bad_torrent", "read_timeout"])
 def test_candidate_fallback_and_no_remote_client(local_swarm, tmp_path, first_status):
     torrent_path, _, port = local_swarm
     app, service, registry, manager = app_for_swarm(tmp_path, torrent_path, port)
@@ -124,6 +124,10 @@ def test_candidate_fallback_and_no_remote_client(local_swarm, tmp_path, first_st
             if release == first:
                 if first_status == "error":
                     return MetadataResolution("unavailable")
+                if first_status == "read_timeout":
+                    return MetadataResolution("ok", inspect_torrent(torrent_path), torrent_path.read_bytes())
+                if first_status == "bad_torrent":
+                    return MetadataResolution("ok", inspect_torrent(torrent_path), b"invalid torrent")
                 name = "other.mp3" if first_status == "missing" else "selected live.mp3"
                 wrong = TorrentMetadata("album", (TorrentFile(0, name, "album/" + name, 100, ".mp3"),))
                 return MetadataResolution("ok", wrong, torrent_path.read_bytes())
@@ -131,6 +135,18 @@ def test_candidate_fallback_and_no_remote_client(local_swarm, tmp_path, first_st
 
     service.search = Search()
     service.resolver = Resolver()
+    if first_status == "read_timeout":
+        original_read = registry.read
+        calls = 0
+
+        async def fail_first_read(*args, **kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise TimeoutError("no verified bytes")
+            return await original_read(*args, **kwargs)
+
+        registry.read = fail_first_read
     with TestClient(app, client=("127.0.0.1", 12345)) as client:
         started = client.post("/api/experimental/playback/prepare", json=track()).json()
         assert wait_status(client, started["job_id"], {"ready", "unavailable", "error"})["status"] == "ready"

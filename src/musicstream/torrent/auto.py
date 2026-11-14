@@ -7,6 +7,7 @@ import ipaddress
 import re
 import secrets
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
@@ -21,7 +22,7 @@ from .metadata import inspect_torrent, select_audio_file
 from .metadata_resolver import MetadataResolution
 from .prowlarr_discovery import MusicRelease, ProwlarrDiscoveryProvider
 from .release_selection import rank_releases
-from .track_matcher import TrackReference, match_track
+from .track_matcher import TrackReference
 
 
 router = APIRouter(prefix="/api/experimental/playback", include_in_schema=False)
@@ -49,8 +50,9 @@ class OwnedTorrentSource:
         if not artist.strip() or not album.strip():
             return ()
         # The local test album may be a compilation; file matching is decisive.
-        return (MusicRelease("owned_local", "owned:local", f"{artist} - {album} MP3 tracks",
-                             ("Audio/MP3",), sum(f.size for f in self.metadata.files), 1,
+        audio_format = "FLAC" if any(f.extension == ".flac" for f in self.metadata.files) else "MP3"
+        return (MusicRelease("owned_local", "owned:local", f"{artist} - {album} {audio_format} tracks",
+                             (f"Audio/{audio_format}",), sum(f.size for f in self.metadata.files), 1,
                              0, "Owned local test"),)
 
     async def resolve(self, release: MusicRelease) -> MetadataResolution:
@@ -92,11 +94,13 @@ class AutoTorrentPlayback:
 
     def __init__(self, search: SearchSource, resolver: MetadataSource,
                  registry: TorrentPlaybackRegistry, *, peers: tuple[tuple[str, int], ...],
-                 max_candidates: int = 5, first_bytes: int = 4096):
+                 max_candidates: int = 5, first_bytes: int = 4096,
+                 preparation_timeout_seconds: float = 60):
         if not peers and registry.manager.network_mode not in ("public_discovery", "safe_webseed"):
             raise ValueError("An explicit peer is required")
         registry.manager.validate_peers(peers)
-        if not 1 <= max_candidates <= 10 or not 1 <= first_bytes <= 65536:
+        if (not 1 <= max_candidates <= 10 or not 1 <= first_bytes <= 65536
+                or not 5 <= preparation_timeout_seconds <= 180):
             raise ValueError("Invalid preparation limits")
         self.search = search
         self.resolver = resolver
@@ -104,6 +108,7 @@ class AutoTorrentPlayback:
         self.peers = peers
         self.max_candidates = max_candidates
         self.first_bytes = first_bytes
+        self.preparation_timeout_seconds = preparation_timeout_seconds
         self._lock = asyncio.Lock()
         self._job: _Job | None = None
         self._cancelled_ids: set[str] = set()
@@ -128,27 +133,57 @@ class AutoTorrentPlayback:
 
     async def _prepare(self, job: _Job, reference: TrackReference) -> None:
         had_error = False
+        deadline = time.monotonic() + self.preparation_timeout_seconds
         try:
-            releases = await self.search.search(reference.artist, reference.album, limit=20)
+            releases = await asyncio.wait_for(
+                self.search.search(reference.artist, reference.album, limit=20),
+                timeout=max(0.01, deadline - time.monotonic()),
+            )
             ordered = rank_releases(reference, releases, {}).ranked[:self.max_candidates]
+            resolved_by_id: dict[str, MetadataResolution] = {}
             for candidate in ordered:
                 if job is not self._job:
                     return
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
                 try:
-                    resolved = await self.resolver.resolve(candidate.release)
-                    if resolved.status != "ok" or resolved.metadata is None or resolved.torrent_bytes is None:
-                        had_error |= resolved.status not in ("unsupported_source",)
-                        continue
-                    matched = match_track(reference, resolved.metadata)
-                    if matched.status != "matched" or matched.file_index is None:
-                        continue
-                    chosen = select_audio_file(resolved.metadata, matched.file_index)
-                    if chosen.extension != ".mp3" or chosen.size == 0:
-                        continue
-                    verified = rank_releases(reference, (candidate.release,),
-                                             {candidate.release.source_id: resolved.metadata})
-                    if verified.release is None:
-                        continue
+                    resolved = await asyncio.wait_for(
+                        self.resolver.resolve(candidate.release), timeout=min(20, remaining))
+                except TimeoutError:
+                    had_error = True
+                    continue
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    had_error = True
+                    continue
+                if resolved.status == "ok" and resolved.metadata and resolved.torrent_bytes:
+                    resolved_by_id[candidate.release.source_id] = resolved
+                else:
+                    had_error |= resolved.status not in ("unsupported_source",)
+
+            selection = rank_releases(
+                reference, tuple(item.release for item in ordered),
+                {key: value.metadata for key, value in resolved_by_id.items()},
+            )
+            if selection.reason == "ambiguous_releases":
+                job.status = "unavailable"
+                return
+            for candidate in selection.ranked:
+                if job is not self._job or time.monotonic() >= deadline:
+                    break
+                resolved = resolved_by_id.get(candidate.release.source_id)
+                if resolved is None or resolved.metadata is None or resolved.torrent_bytes is None:
+                    continue
+                verified = rank_releases(reference, (candidate.release,),
+                                         {candidate.release.source_id: resolved.metadata})
+                if verified.release is None or verified.file_index is None:
+                    continue
+                chosen = select_audio_file(resolved.metadata, verified.file_index)
+                if chosen.extension not in (".mp3", ".flac") or chosen.size == 0:
+                    continue
+                try:
                     token = secrets.token_urlsafe(18)
                     path = Path(self._temporary.name) / f"{token}.torrent"
                     path.write_bytes(resolved.torrent_bytes)
@@ -170,11 +205,14 @@ class AutoTorrentPlayback:
                             continue
                         approved.close()
                     job.playback_id = token
-                    self.registry.register(token, path, matched.file_index, peers=self.peers)
+                    self.registry.register(token, path, verified.file_index, peers=self.peers)
                     job.status = "buffering"
                     lease = await self.registry.acquire(token)
                     try:
-                        await self.registry.read(lease, 0, min(self.first_bytes, chosen.size))
+                        await asyncio.wait_for(
+                            self.registry.read(lease, 0, min(self.first_bytes, chosen.size)),
+                            timeout=max(0.01, deadline - time.monotonic()),
+                        )
                     finally:
                         await self.registry.release(lease)
                     job.status = "ready"

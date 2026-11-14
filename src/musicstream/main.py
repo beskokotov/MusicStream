@@ -37,7 +37,10 @@ async def lifespan(app: FastAPI):
                 peers = (("127.0.0.1", int(peer_port)),) if peer_port else ()
             else:
                 raise ValueError("Invalid BitTorrent network mode")
-            connect_timeout = int(os.getenv("MUSICSTREAM_TORRENT_PEER_CONNECT_TIMEOUT", "8"))
+            connect_timeout = int(os.getenv(
+                "MUSICSTREAM_TORRENT_PEER_CONNECT_TIMEOUT",
+                "12" if network_mode == "public_discovery" else "8",
+            ))
             public_hashes = frozenset()
             if network_mode in ("public_discovery", "safe_webseed"):
                 raw_hashes = json.loads(os.environ["MUSICSTREAM_TORRENT_PUBLIC_APPROVED_INFO_HASHES"])
@@ -50,7 +53,8 @@ async def lifespan(app: FastAPI):
                 manager = SafeWebSeedManager(approved_info_hashes=public_hashes)
             else:
                 manager = TorrentSessionManager(
-                    max_sessions=1, max_connections=4 if network_mode != "loopback" else 8,
+                    max_sessions=1, max_connections=(12 if network_mode == "public_discovery"
+                                                     else 4 if network_mode == "remote_tcp" else 8),
                     network_mode=network_mode, peer_connect_timeout_seconds=connect_timeout,
                     approved_public_info_hashes=public_hashes,
                     public_bind_ip=os.getenv("MUSICSTREAM_TORRENT_PUBLIC_BIND_IP")

@@ -57,7 +57,7 @@ def test_failed_or_untrusted_resolution_does_not_fall_back_to_first_hop(url):
 
 
 def test_only_document_and_single_player_request_are_allowed():
-    assert action("https://ru.hitmox.org/robots.txt") == "document"
+    assert action("https://ru.hitmox.org/unapproved") == "block"
     assert action(f"https://ru.hitmox.org/song/{ID}") == "document"
     assert action(PLAYER, "Media") == "player"
     assert action(PLAYER, "Media", started=True) == "block"

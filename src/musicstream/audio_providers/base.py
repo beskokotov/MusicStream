@@ -9,7 +9,6 @@ class ResolutionDiagnostics(BaseModel):
     """Local-only, allowlisted facts. Never store URLs, headers or cookies."""
 
     elapsed_ms: int | None = None
-    robots_status: int | None = None
     metadata_status: int | None = None
     player_format: Literal["cuts", "music", "missing", "unsupported"] = "missing"
     player_relative: bool = False

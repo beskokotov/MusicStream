@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+import hashlib
+import time
 from datetime import datetime, timezone
 from dataclasses import dataclass
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
+
+from .timing import current_timing
 
 
 class ProwlarrError(RuntimeError):
@@ -45,6 +49,11 @@ class MusicRelease:
     info_hash: str | None = None
     metadata_url: str | None = None
     peers: int | None = None
+
+
+def release_fingerprint(release: MusicRelease) -> str:
+    """Stable local approval token without exposing an indexer URL or GUID."""
+    return "sha256:" + hashlib.sha256(release.source_id.encode("utf-8")).hexdigest()
 
 
 def _local_url(value: object, base_url: str) -> str | None:
@@ -136,15 +145,54 @@ class ProwlarrDiscoveryProvider:
         self.base_url = base_url.rstrip("/")
         self.indexer_ids = indexer_ids
 
-    async def search(self, artist: str, album: str, *, limit: int = 20) -> tuple[MusicRelease, ...]:
+    async def resolve_indexer_priority(self, names: tuple[str, ...]) -> tuple[tuple[int, str], ...]:
+        """Resolve configured torrent indexer names from this Prowlarr instance."""
+        if not names or len({name.strip().casefold() for name in names}) != len(names):
+            raise ValueError("Indexer priority requires distinct names")
+        try:
+            response = await self.client.get(
+                f"{self.base_url}/api/v1/indexer",
+                headers={"X-Api-Key": self.api_key}, timeout=10,
+            )
+        except httpx.RequestError as exc:
+            raise ProwlarrUnavailableError("Could not load configured indexers") from exc
+        if response.status_code in (401, 403):
+            raise ProwlarrAuthError(f"Prowlarr returned HTTP {response.status_code}")
+        if not response.is_success:
+            raise ProwlarrUnavailableError(f"Prowlarr returned HTTP {response.status_code}")
+        try:
+            entries = response.json()
+        except ValueError as exc:
+            raise ProwlarrResponseError("Invalid indexer list") from exc
+        if not isinstance(entries, list):
+            raise ProwlarrResponseError("Invalid indexer list")
+        result = []
+        for requested in names:
+            matching = [entry for entry in entries if isinstance(entry, dict)
+                        and isinstance(entry.get("name"), str)
+                        and entry["name"].strip().casefold() == requested.strip().casefold()
+                        and entry.get("enable") is True and entry.get("protocol") == "torrent"
+                        and isinstance(entry.get("id"), int) and not isinstance(entry["id"], bool)
+                        and entry["id"] > 0]
+            if len(matching) != 1:
+                raise ValueError(f"Configured torrent indexer unavailable: {requested}")
+            result.append((matching[0]["id"], matching[0]["name"]))
+        return tuple(result)
+
+    async def search(self, artist: str, album: str, *, limit: int = 20,
+                     indexer_ids: tuple[int, ...] | None = None) -> tuple[MusicRelease, ...]:
         if not artist.strip() or not album.strip() or not 1 <= limit <= 100:
             raise ValueError("Artist, album and limit are required")
+        selected_indexers = self.indexer_ids if indexer_ids is None else indexer_ids
+        if not selected_indexers and indexer_ids is not None:
+            raise ValueError("Explicit indexer search requires an indexer")
         params: list[tuple[str, str | int]] = [
             ("query", f"{artist.strip()} {album.strip()}"), ("type", "search"),
             ("categories", 3000), ("limit", limit), ("offset", 0),
         ]
-        params.extend(("indexerIds", i) for i in self.indexer_ids)
+        params.extend(("indexerIds", i) for i in selected_indexers)
         search_started = datetime.now(timezone.utc)
+        request_started = time.monotonic()
         try:
             response = await self.client.get(
                 f"{self.base_url}/api/v1/search", params=params,
@@ -152,6 +200,11 @@ class ProwlarrDiscoveryProvider:
             )
         except httpx.RequestError as exc:
             raise ProwlarrUnavailableError("Could not reach Prowlarr or its indexer") from exc
+        finally:
+            timing = current_timing.get()
+            if timing:
+                timing.mark("prowlarr_request", operation_started=request_started,
+                            indexer_id=selected_indexers[0] if len(selected_indexers) == 1 else None)
         if response.status_code in (401, 403):
             raise ProwlarrAuthError(f"Prowlarr returned HTTP {response.status_code}")
         if response.status_code >= 500:
@@ -162,6 +215,13 @@ class ProwlarrDiscoveryProvider:
             releases = parse_releases(response.json(), base_url=self.base_url)
         except ValueError as exc:
             raise ProwlarrResponseError("Prowlarr returned invalid JSON") from exc
+        if selected_indexers:
+            releases = tuple(release for release in releases
+                             if release.indexer_id in selected_indexers)
+        if timing:
+            timing.mark("prowlarr_results", operation_started=request_started,
+                        indexer_id=selected_indexers[0] if len(selected_indexers) == 1 else None,
+                        status=str(len(releases)))
         if not releases:
             try:
                 status = await self.client.get(
@@ -180,7 +240,7 @@ class ProwlarrDiscoveryProvider:
                 raise ProwlarrResponseError("Invalid indexer status response")
             now = datetime.now(timezone.utc)
             for entry in entries:
-                if not isinstance(entry, dict) or (self.indexer_ids and entry.get("indexerId") not in self.indexer_ids):
+                if not isinstance(entry, dict) or (selected_indexers and entry.get("indexerId") not in selected_indexers):
                     continue
                 disabled = entry.get("disabledTill")
                 if isinstance(disabled, str):

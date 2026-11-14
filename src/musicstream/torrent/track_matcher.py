@@ -19,7 +19,8 @@ _CYRILLIC = str.maketrans({
     "ы": "y", "ь": "", "э": "e", "ю": "yu", "я": "ya",
 })
 _VERSION = {"live", "remix", "acoustic", "instrumental", "karaoke", "demo", "remaster",
-            "remastered", "edit", "mix", "radio", "концерт", "ремикс", "акустика", "демо"}
+            "remastered", "edit", "mix", "radio", "концерт", "ремикс", "акустика", "демо",
+            "deluxe", "anniversary", "reissue", "vinyl", "винил"}
 
 
 def normalize(value: str) -> str:

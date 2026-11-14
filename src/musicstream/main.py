@@ -25,6 +25,8 @@ async def lifespan(app: FastAPI):
             from musicstream.torrent.session import TorrentSessionManager
 
             network_mode = os.getenv("MUSICSTREAM_TORRENT_NETWORK_MODE", "loopback")
+            fast_priority = bool(network_mode == "public_discovery" and
+                                 os.getenv("MUSICSTREAM_TORRENT_INDEXER_PRIORITY") and TORRENT_AUTO_ENABLED)
             if network_mode == "remote_tcp":
                 raw_peers = json.loads(os.environ["MUSICSTREAM_TORRENT_REMOTE_PEERS"])
                 if not isinstance(raw_peers, list) or not raw_peers:
@@ -42,8 +44,10 @@ async def lifespan(app: FastAPI):
                 "12" if network_mode == "public_discovery" else "8",
             ))
             public_hashes = frozenset()
+            allow_unlisted_public = (network_mode == "public_discovery" and
+                                     os.getenv("MUSICSTREAM_TORRENT_ALLOW_UNLISTED_PUBLIC") == "true")
             if network_mode in ("public_discovery", "safe_webseed"):
-                raw_hashes = json.loads(os.environ["MUSICSTREAM_TORRENT_PUBLIC_APPROVED_INFO_HASHES"])
+                raw_hashes = json.loads(os.getenv("MUSICSTREAM_TORRENT_PUBLIC_APPROVED_INFO_HASHES", "[]"))
                 if not isinstance(raw_hashes, list) or any(not isinstance(value, str) for value in raw_hashes):
                     raise ValueError("Approved public info hashes must be a JSON array of strings")
                 public_hashes = frozenset(value.lower() for value in raw_hashes)
@@ -53,10 +57,12 @@ async def lifespan(app: FastAPI):
                 manager = SafeWebSeedManager(approved_info_hashes=public_hashes)
             else:
                 manager = TorrentSessionManager(
-                    max_sessions=1, max_connections=(12 if network_mode == "public_discovery"
+                    max_sessions=2 if fast_priority else 1,
+                    max_connections=(12 if network_mode == "public_discovery"
                                                      else 4 if network_mode == "remote_tcp" else 8),
                     network_mode=network_mode, peer_connect_timeout_seconds=connect_timeout,
                     approved_public_info_hashes=public_hashes,
+                    allow_unlisted_public=allow_unlisted_public,
                     public_bind_ip=os.getenv("MUSICSTREAM_TORRENT_PUBLIC_BIND_IP")
                     if network_mode == "public_discovery" else None,
                 )
@@ -71,7 +77,7 @@ async def lifespan(app: FastAPI):
             if not 1 <= read_timeout <= 60:
                 raise ValueError("Range read timeout must be 1-60 seconds")
             registry = TorrentPlaybackRegistry(
-                manager, max_streams=1 if TORRENT_AUTO_ENABLED else 2,
+                manager, max_streams=2 if fast_priority else 1 if TORRENT_AUTO_ENABLED else 2,
                 read_timeout_seconds=read_timeout,
             )
             auto = None
@@ -97,15 +103,35 @@ async def lifespan(app: FastAPI):
                     if owned_source:
                         search = resolver = OwnedTorrentSource(Path(owned_source))
                     else:
-                        approved = frozenset(json.loads(os.environ["MUSICSTREAM_TORRENT_APPROVED_SOURCE_IDS"]))
-                        indexers = tuple(int(value) for value in
-                                         os.environ["MUSICSTREAM_TORRENT_ALLOWED_INDEXER_IDS"].split(","))
+                        approved = frozenset(json.loads(os.getenv("MUSICSTREAM_TORRENT_APPROVED_SOURCE_IDS", "[]")))
                         prowlarr_client = httpx.AsyncClient(trust_env=False)
+                        provider = ProwlarrDiscoveryProvider(prowlarr_client)
+                        priority_raw = os.getenv("MUSICSTREAM_TORRENT_INDEXER_PRIORITY")
+                        if priority_raw:
+                            priority_names = json.loads(priority_raw)
+                            if (not isinstance(priority_names, list) or not priority_names
+                                    or any(not isinstance(name, str) or not name.strip()
+                                           for name in priority_names)):
+                                raise ValueError("Indexer priority must be a JSON array of names")
+                            indexer_priority = await provider.resolve_indexer_priority(tuple(priority_names))
+                            indexers = tuple(indexer_id for indexer_id, _ in indexer_priority)
+                        else:
+                            indexer_priority = ()
+                            indexers = tuple(int(value) for value in
+                                             os.environ["MUSICSTREAM_TORRENT_ALLOWED_INDEXER_IDS"].split(","))
+                        provider.indexer_ids = indexers
                         search = ApprovedProwlarrSource(
-                            ProwlarrDiscoveryProvider(prowlarr_client, indexer_ids=indexers), approved)
+                            provider, approved, allow_unlisted=allow_unlisted_public,
+                            indexer_priority=indexer_priority)
                         resolver = TorrentMetadataResolver(
-                            prowlarr_client, allowed_indexer_ids=indexers)
-                    auto = AutoTorrentPlayback(search, resolver, registry, peers=peers)
+                            prowlarr_client, allowed_indexer_ids=indexers,
+                            approved_info_hashes=public_hashes,
+                            allow_unlisted_public=allow_unlisted_public,
+                            public_bind_ip=os.getenv("MUSICSTREAM_TORRENT_PUBLIC_BIND_IP")
+                            if network_mode == "public_discovery" else None)
+                    auto = AutoTorrentPlayback(
+                        search, resolver, registry, peers=peers,
+                        preparation_timeout_seconds=120 if getattr(search, "indexer_priority", ()) else 60)
                     app.state.torrent_auto = auto
                 yield
             finally:

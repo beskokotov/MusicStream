@@ -15,9 +15,9 @@ from test_hitmos_discovery import REF, Reader
 async def main():
     provider = HitmosProvider(Reader())
     automatic = (await provider.find(REF)).model_dump()
-    ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", 272),
-                                             "2": ("Sonne", "Rammstein", 272)})).find(REF)).model_dump()
-    blocked = (await HitmosProvider(Reader(error="robots_disallowed")).find(REF)).model_dump()
+    ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", None),
+                                             "2": ("Sonne", "Rammstein", None)})).find(REF)).model_dump()
+    unavailable = (await HitmosProvider(Reader(error="source_http_error")).find(REF)).model_dump()
     scenario = [automatic]
     requests = []
     async with async_playwright() as runtime:
@@ -81,9 +81,9 @@ async def main():
             assert await page.locator("#source-candidates button").count() == 2
             assert "Выберите запись" in await page.locator("#playback-state").inner_text()
 
-            scenario[0] = blocked
+            scenario[0] = unavailable
             await page.locator(".track-title").click()
-            await page.wait_for_function("document.querySelector('#source-status').textContent.includes('robots.txt')")
+            await page.wait_for_function("document.querySelector('#source-status').textContent.length > 0")
             assert await page.locator("#player-play").is_disabled()
             await page.locator("#hitmos-advanced summary").click()
             assert await page.locator("#hitmos-url").is_visible()
@@ -98,7 +98,7 @@ async def main():
                 await page.set_viewport_size({"width": width, "height": 900})
                 assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             assert not errors, errors
-            print("BROWSER PASS: automatic discovery on selection, fresh resolve on Play, ambiguous selection, robots fallback, advanced manual input, source switching, responsive layout, no fake playback")
+            print("BROWSER PASS: automatic discovery on selection, fresh resolve on Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:
             await browser.close()
 
@@ -114,7 +114,7 @@ def test_multi_source_interface_without_network():
         from test_source_service import REF, Provider, item
 
         service = SourceSelectionService({
-            "hitmos": Provider("hitmos", status="blocked", reason="robots_disallowed"),
+            "hitmos": Provider("hitmos", status="ok", reason="no_results"),
             "youtube": Provider("youtube", [item("youtube")]),
         })
         calls = []

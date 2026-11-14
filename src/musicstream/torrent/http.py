@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 
 class _VerifiedRangeResponse(StreamingResponse):
-    """On a later piece failure, leave Content-Length incomplete so clients reject it."""
+    """On a later piece failure, close an incomplete range for a client retry."""
 
     async def stream_response(self, send):
         await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
@@ -31,9 +31,16 @@ class _VerifiedRangeResponse(StreamingResponse):
             async for chunk in self.body_iterator:
                 await send({"type": "http.response.body", "body": chunk, "more_body": True})
         except (IOError, TimeoutError, RuntimeError) as exc:
-            # No terminal body: ASGI server closes an incomplete Content-Length
-            # response. The browser must discard/retry the truncated range.
-            logger.warning("Verified Web Seed Range interrupted: %s", type(exc).__name__)
+            # No terminal body: ASGI closes an incomplete Content-Length range.
+            # Keep the playback registration alive; the browser retries at its
+            # current position and the same torrent session can reconnect.
+            details = None
+            try:
+                if track.transfer is not None:
+                    details = track.transfer.diagnostics()
+            except RuntimeError:
+                pass
+            logger.warning("HTTP Range interrupted reason=%s", _range_failure_reason(exc, details))
             return
         await send({"type": "http.response.body", "body": b"", "more_body": False})
 
@@ -48,6 +55,7 @@ class _Track:
     idle_since: float = 0
     first_range_seconds: float | None = None
     interrupted_ranges: int = 0
+    revoked: bool = False
 
 
 class TorrentPlaybackRegistry:
@@ -97,18 +105,40 @@ class TorrentPlaybackRegistry:
             raise KeyError(playback_id)
         return track.transfer.diagnostics() if track.transfer is not None else None
 
+    async def keepalive(self, playback_id: str) -> None:
+        """Extend an open player's idle lease without opening a new P2P session."""
+        async with self._lock:
+            track = self._tracks.get(playback_id)
+            if track is None or track.revoked:
+                raise KeyError(playback_id)
+            if track.transfer is not None:
+                track.idle_since = time.monotonic()
+
     async def unregister(self, playback_id: str) -> None:
         """Revoke a prepared track and close its transfer on cancellation."""
         async with self._lock:
             track = self._tracks.pop(playback_id, None)
-            if track is not None and track.transfer is not None:
-                await track.transfer.aclose()
-                track.transfer = None
+            if track is not None:
+                await self._revoke_locked(track)
 
-    async def acquire(self, playback_id: str) -> _Track:
-        self.file(playback_id)
+    async def _revoke_locked(self, track: _Track) -> None:
+        """Release permits even if a disconnected ASGI body is never resumed."""
+        track.revoked = True
         try:
-            await asyncio.wait_for(self._streams.acquire(), timeout=0.1)
+            if track.transfer is not None:
+                await track.transfer.aclose()
+        finally:
+            track.transfer = None
+            for _ in range(track.users):
+                self._streams.release()
+            track.users = 0
+
+    async def acquire(self, playback_id: str, *, wait_seconds: float = 0.1) -> _Track:
+        self.file(playback_id)
+        if not 0 < wait_seconds <= 10:
+            raise ValueError("Invalid stream wait limit")
+        try:
+            await asyncio.wait_for(self._streams.acquire(), timeout=wait_seconds)
         except TimeoutError as exc:
             raise HTTPException(429, "Torrent stream limit reached") from exc
         try:
@@ -135,24 +165,42 @@ class TorrentPlaybackRegistry:
 
     async def release(self, track: _Track) -> None:
         async with self._lock:
+            if track.revoked:
+                return
+            if track.users <= 0:
+                raise RuntimeError("Torrent stream lease was released twice")
             track.users -= 1
             track.idle_since = time.monotonic()
-        self._streams.release()
+            self._streams.release()
 
-    async def read(self, track: _Track, start: int, end: int) -> bytes:
+    async def read(self, track: _Track, start: int, end: int,
+                   *, timeout_seconds: float | None = None) -> bytes:
+        if track.revoked or track.transfer is None:
+            raise IOError("Torrent playback was revoked")
         try:
-            return await track.transfer.read_range(start, end, timeout_seconds=self.read_timeout_seconds)
+            return await track.transfer.read_range(
+                start, end, timeout_seconds=timeout_seconds or self.read_timeout_seconds)
         except CacheLimitError:
             # A long playback can outgrow its bounded cache. Rotate only when no
             # other response is using this transfer.
             async with self._lock:
+                if track.revoked or track.transfer is None:
+                    raise IOError("Torrent playback was revoked")
                 if track.users != 1:
                     raise
                 await track.transfer.aclose()
                 transfer = self.manager.open_torrent(track.path, track.file.index, peers=track.peers)
                 await transfer.__aenter__()
                 track.transfer = transfer
-            return await transfer.read_range(start, end, timeout_seconds=self.read_timeout_seconds)
+            return await transfer.read_range(
+                start, end, timeout_seconds=timeout_seconds or self.read_timeout_seconds)
+
+    def chunk_end(self, track: _Track, start: int, end: int) -> int:
+        boundary = min(start + self.block_size, end)
+        next_piece = getattr(track.transfer, "next_piece_boundary", None)
+        if next_piece is not None:
+            boundary = min(boundary, next_piece(start, end))
+        return boundary
 
     async def reap_idle(self) -> None:
         async with self._lock:
@@ -184,9 +232,8 @@ class TorrentPlaybackRegistry:
             self._reaper = None
         async with self._lock:
             for track in self._tracks.values():
-                if track.transfer is not None:
-                    await track.transfer.aclose()
-                    track.transfer = None
+                await self._revoke_locked(track)
+            self._tracks.clear()
         await self.manager.aclose()
 
 
@@ -244,7 +291,7 @@ async def _stream(request: Request, playback_id: str, head: bool):
     prepared_at = time.monotonic()
     track = await registry.acquire(playback_id)
     if registry.manager.network_mode == "safe_webseed":
-        first_end = min(start + registry.block_size, end)
+        first_end = registry.chunk_end(track, start, end)
         read_task = asyncio.create_task(registry.read(track, start, first_end))
         try:
             while not read_task.done():
@@ -270,16 +317,45 @@ async def _stream(request: Request, playback_id: str, head: bool):
                 raise HTTPException(502, "Verified Web Seed bytes unavailable") from exc
             raise
     else:
+        first_end = registry.chunk_end(track, start, end)
+        read_task = asyncio.create_task(registry.read(track, start, first_end))
         try:
-            first_end = min(start + registry.block_size, end)
-            first = await registry.read(track, start, first_end)
+            while not read_task.done():
+                try:
+                    await asyncio.wait_for(asyncio.shield(read_task), timeout=0.1)
+                except TimeoutError:
+                    if await request.is_disconnected():
+                        read_task.cancel()
+                        await asyncio.gather(read_task, return_exceptions=True)
+                        logger.info("HTTP Range cancelled reason=browser_disconnected")
+                        raise HTTPException(499, "Client disconnected")
+            first = await read_task
         except BaseException as exc:
+            if not read_task.done():
+                read_task.cancel()
+                await asyncio.gather(read_task, return_exceptions=True)
+            details = None
+            try:
+                details = registry.diagnostics(playback_id)
+            except (KeyError, RuntimeError):
+                pass
             await registry.release(track)
             if isinstance(exc, TimeoutError):
+                logger.warning("HTTP Range unavailable reason=%s", _range_failure_reason(exc, details))
                 raise HTTPException(504, "Torrent peer timed out") from exc
             if isinstance(exc, CacheLimitError):
+                logger.warning("HTTP Range unavailable reason=verified_cache_limit")
                 raise HTTPException(507, "Torrent disk cache limit reached") from exc
+            if isinstance(exc, (IOError, RuntimeError)):
+                logger.warning("HTTP Range unavailable reason=%s", _range_failure_reason(exc))
+                raise HTTPException(502, "Torrent range temporarily unavailable") from exc
             raise
+
+    if track.first_range_seconds is None:
+        track.first_range_seconds = time.monotonic() - prepared_at
+    timing = getattr(track.transfer, "_timing", None)
+    if timing is not None:
+        timing.mark("http_range_ready", operation_started=prepared_at)
 
     async def body():
         try:
@@ -288,8 +364,9 @@ async def _stream(request: Request, playback_id: str, head: bool):
             position = first_end
             while position < end:
                 if await request.is_disconnected():
+                    logger.info("HTTP Range cancelled reason=browser_disconnected")
                     break
-                next_end = min(position + registry.block_size, end)
+                next_end = registry.chunk_end(track, position, end)
                 try:
                     yield await registry.read(track, position, next_end)
                 except (IOError, TimeoutError, RuntimeError):
@@ -299,8 +376,7 @@ async def _stream(request: Request, playback_id: str, head: bool):
         finally:
             await registry.release(track)
 
-    response_type = _VerifiedRangeResponse if registry.manager.network_mode == "safe_webseed" else StreamingResponse
-    return response_type(body(), status_code=status, headers=headers, media_type=content_type)
+    return _VerifiedRangeResponse(body(), status_code=status, headers=headers, media_type=content_type)
 
 
 @router.get("/{playback_id}")
@@ -311,3 +387,39 @@ async def get_audio(request: Request, playback_id: str):
 @router.head("/{playback_id}")
 async def head_audio(request: Request, playback_id: str):
     return await _stream(request, playback_id, True)
+
+
+def _range_failure_reason(exc: BaseException, details: TorrentDiagnostics | None = None) -> str:
+    if isinstance(exc, TimeoutError):
+        if details is not None:
+            if details.connected_peers == 0:
+                return "no_connected_peers"
+            if details.no_transfer_reason == "requested_piece_peers_choking":
+                return "peer_choking_requested_piece"
+            if details.no_transfer_reason == "requested_pieces_not_advertised":
+                return "connected_peers_missing_requested_piece"
+            if details.downloaded_payload_bytes > 0:
+                return "peer_payload_stalled_before_verified_piece"
+        return "piece_wait_timeout"
+    if isinstance(exc, CacheLimitError):
+        return "verified_cache_limit"
+    if isinstance(exc, RuntimeError) and "closed" in str(exc).lower():
+        return "session_closed"
+    if isinstance(exc, (IOError, OSError)):
+        return "range_io_error"
+    return "range_runtime_error"
+
+
+@router.post("/{playback_id}/keepalive", status_code=204)
+async def keepalive(request: Request, playback_id: str):
+    registry = _registry(request)
+    try:
+        await registry.keepalive(playback_id)
+    except KeyError as exc:
+        raise HTTPException(404, "Unknown torrent playback") from exc
+
+
+@router.delete("/{playback_id}", status_code=204)
+async def delete_playback(request: Request, playback_id: str):
+    registry = _registry(request)
+    await registry.unregister(playback_id)

@@ -98,16 +98,40 @@ def test_browser_play_pause_seek_and_switch(tmp_path):
                 page.press("#search-input", "Enter")
                 page.locator(".track-title").first.wait_for(timeout=10000)
                 page.locator(".track-title").first.click()
+                range_attempts = {"aborted": 0, "continued": 0, "keepalive": 0}
+
+                def fail_one_range(route):
+                    if route.request.url.endswith("/keepalive"):
+                        range_attempts["keepalive"] += 1
+                        route.continue_()
+                    elif route.request.headers.get("range") and range_attempts["aborted"] == 0:
+                        range_attempts["aborted"] += 1
+                        route.abort()
+                    else:
+                        if route.request.headers.get("range"):
+                            range_attempts["continued"] += 1
+                        route.continue_()
+
+                page.route("**/api/experimental/torrent/**", fail_one_range)
                 page.locator("#player-play").click()
                 page.wait_for_function("document.querySelector('#hitmos-audio').readyState >= 1", timeout=20000)
                 page.wait_for_function("!document.querySelector('#hitmos-audio').paused", timeout=20000)
                 page.wait_for_function("document.querySelector('#hitmos-audio').currentTime > 0.1", timeout=10000)
+                assert range_attempts["aborted"] == 1
+                assert range_attempts["continued"] >= 1
                 page.locator("#player-play").click()
                 assert page.eval_on_selector("#hitmos-audio", "audio => audio.paused")
                 page.locator("#player-play").click()
                 page.wait_for_function("!document.querySelector('#hitmos-audio').paused", timeout=5000)
                 page.eval_on_selector("#player-seek", "input => { input.value = '10'; input.dispatchEvent(new Event('change', { bubbles: true })); }")
                 page.wait_for_function("document.querySelector('#hitmos-audio').currentTime >= 9", timeout=10000)
+                full_play_started = time.monotonic()
+                page.eval_on_selector("#hitmos-audio", "audio => { audio.playbackRate = 8; audio.currentTime = 0; audio.play(); }")
+                page.wait_for_function("document.querySelector('#hitmos-audio').ended", timeout=45000)
+                full_play = page.eval_on_selector("#hitmos-audio", "audio => ({ current: audio.currentTime, duration: audio.duration })")
+                assert full_play["current"] >= full_play["duration"] - 0.1
+                print(f"browser_full_track_duration={full_play['duration']:.3f}s playback_rate=8x wall_seconds={time.monotonic() - full_play_started:.3f}")
+                assert range_attempts["keepalive"] >= 1
                 page.locator(".track-title").nth(1).click()
                 assert page.eval_on_selector("#hitmos-audio", "audio => !audio.hasAttribute('src')")
                 page.locator("#player-play").click()

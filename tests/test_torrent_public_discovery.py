@@ -85,6 +85,31 @@ def test_private_and_unapproved_torrents_rejected_before_session(tmp_path, monke
     asyncio.run(run())
 
 
+def test_catalog_mode_still_rejects_private_torrents(tmp_path, monkeypatch):
+    private = tmp_path / "private.torrent"
+    _torrent(private, private=True)
+    public = tmp_path / "public.torrent"
+    _torrent(public)
+    manager = TorrentSessionManager(
+        settings=TorrentSettings(tmp_path / "cache", 65536),
+        max_sessions=1, max_connections=4, network_mode="public_discovery",
+        public_bind_ip="10.0.0.42", allow_unlisted_public=True,
+    )
+    monkeypatch.setattr(lt, "session", lambda *args: (_ for _ in ()).throw(
+        RuntimeError("public session reached")))
+
+    async def run():
+        with pytest.raises(ValueError, match="Private"):
+            async with manager.open_torrent(private, 0):
+                pass
+        with pytest.raises(RuntimeError, match="public session reached"):
+            async with manager.open_torrent(public, 0):
+                pass
+        assert manager.active_sessions == 0
+
+    asyncio.run(run())
+
+
 def test_public_trackers_and_safe_diagnostics_without_network(tmp_path, monkeypatch):
     torrent = tmp_path / "owned.torrent"
     info_hash, payload = _torrent(torrent)

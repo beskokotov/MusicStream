@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from musicstream.audio_providers.base import RecordingReference, SourceDocument
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids
-from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, allowed_document, allowed_search_url, request_action, robots_allow_song
+from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, request_action
 from musicstream.audio_providers.matching import assess
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
@@ -70,10 +70,11 @@ def test_play_resolves_fresh_address_with_the_existing_lookup():
     asyncio.run(run())
 
 
-def test_multiple_equal_duration_matches_require_user_choice():
+def test_duplicate_exact_matches_choose_first_ranked_hitmos_record():
     result = find(Reader({"1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272)}))
-    assert result.selection == "choose" and result.selected_id is None
-    assert all(c.selection_reason == "manual_confirmation_required" for c in result.candidates)
+    assert result.selection == "automatic" and result.selected_id == "1"
+    assert len(result.candidates) == 1
+    assert result.candidates[0].selection_reason == "unique_high_confidence"
 
 
 @pytest.mark.parametrize("version", ["Live", "Remix", "Radio Edit", "Explicit", "Clean"])
@@ -105,18 +106,14 @@ def test_explicit_true_needs_source_confirmation_and_false_is_not_clean():
 
 
 def test_partial_failure_or_truncated_search_disables_auto_choice():
-    result = find(Reader({"1": ("Sonne", "Rammstein", 272), "2": None}))
-    assert result.selected_id is None
-    reader = Reader({str(i): ("Sonne" if i == 1 else "Different", "Rammstein", 272) for i in range(1, 6)})
+    reader = Reader({"1": ("Sonne Live", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272), "3": None})
     result = find(reader)
-    assert result.selected_id is None
-    assert len(result.candidates) == 3
-    assert len(reader.calls) == 4  # one search + at most three metadata pages
+    assert result.selection == "automatic" and result.selected_id == "2"
+    assert len(reader.calls) == 3  # search, rejected Live result, exact studio recording
 
 
 def test_empty_result_and_source_errors_are_distinct():
     assert find(Reader({})).reason == "no_results"
-    assert find(Reader(error="robots_disallowed")).reason == "robots_disallowed"
     assert find(Reader(error="source_http_error")).status == "error"
     assert find(Reader({"1": None})).reason == "candidate_metadata_failed"
 
@@ -140,9 +137,9 @@ def test_bounded_ttl_cache_coalesces_concurrent_discovery_and_returns_copies():
     asyncio.run(run())
 
 
-def test_negative_cache_prevents_repeated_robots_requests():
+def test_negative_cache_prevents_repeated_failed_search_requests():
     async def run():
-        reader = Reader(error="robots_disallowed")
+        reader = Reader(error="source_http_error")
         provider = HitmosProvider(reader)
         await provider.find(REF)
         await provider.find(REF)
@@ -150,20 +147,13 @@ def test_negative_cache_prevents_repeated_robots_requests():
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("rules,allowed", [
-    ("User-agent: *\nDisallow: *q=*", False),
-    ("User-agent: *\nDisallow: /search", False),
-    ("<html>challenge</html>", False),
-    ("User-agent: *\nDisallow: /private", True),
-])
-def test_browser_reads_policy_before_search_and_never_loads_media(monkeypatch, rules, allowed):
+def test_browser_search_fetches_query_without_loading_media(monkeypatch):
     api = pytest.importorskip("playwright.async_api")
     visited = []
 
     async def goto(url, **kwargs):
         visited.append(url)
-        body = rules if url.endswith("robots.txt") else '<a href="/song/1">Sonne</a>'
-        return SimpleNamespace(status=200, url=url, body=AsyncMock(return_value=body.encode()))
+        return SimpleNamespace(status=200, url=url, body=AsyncMock(return_value=b'<a href="/song/1">Sonne</a>'))
 
     page = SimpleNamespace(goto=goto, evaluate=AsyncMock(), close=AsyncMock())
     cdp = SimpleNamespace(send=AsyncMock(return_value={"frameTree": {"frame": {"id": "main"}}}), on=Mock())
@@ -179,17 +169,39 @@ def test_browser_reads_policy_before_search_and_never_loads_media(monkeypatch, r
 
     async def run():
         reader = HitmosBrowserReader()
-        if allowed:
-            result = await reader.read_search("Rammstein Sonne")
-            assert parse_search_ids(result.html) == ["1"]
-            assert visited == ["https://ru.hitmox.org/robots.txt", SEARCH]
-        else:
-            with pytest.raises(SourceFailure) as error:
-                await reader.read_search("Rammstein Sonne")
-            assert error.value.reason == "robots_disallowed"
-            assert error.value.stage == "source_search"
-            assert visited == ["https://ru.hitmox.org/robots.txt"]
+        result = await reader.read_search("Rammstein Sonne")
+        assert parse_search_ids(result.html) == ["1"]
+        assert visited == [SEARCH]
         page.evaluate.assert_not_called()
+        browser.close.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_browser_search_reports_http_denial_without_retrying_or_challenge_bypass(monkeypatch):
+    api = pytest.importorskip("playwright.async_api")
+    visited = []
+
+    async def goto(url, **kwargs):
+        visited.append(url)
+        return SimpleNamespace(status=403, url=url, body=AsyncMock(return_value=b"blocked"))
+
+    page = SimpleNamespace(goto=goto, evaluate=AsyncMock(), close=AsyncMock())
+    cdp = SimpleNamespace(send=AsyncMock(return_value={"frameTree": {"frame": {"id": "main"}}}), on=Mock())
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp))
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
+    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
+
+    @asynccontextmanager
+    async def fake_runtime():
+        yield runtime
+
+    monkeypatch.setattr(api, "async_playwright", fake_runtime)
+
+    async def run():
+        with pytest.raises(SourceFailure) as error:
+            await HitmosBrowserReader().read_search("Rammstein Sonne")
+        assert error.value.reason == "automated_access_denied"
+        assert visited == [SEARCH]
         browser.close.assert_awaited_once()
     asyncio.run(run())
 
@@ -218,13 +230,6 @@ def test_shared_parser_deduplicates_and_rejects_foreign_song_links():
         parse_search_ids(" " * 262145)
 
 
-def test_current_robots_is_checked_including_query_string():
-    rules = "User-agent: *\nDisallow: *q=*\nDisallow: /get/"
-    assert not robots_allow_song(rules, SEARCH)
-    assert robots_allow_song("User-agent: *\nDisallow: /private", SEARCH)
-    assert robots_allow_song(rules, "https://ru.hitmox.org/song/1")
-
-
 @pytest.mark.parametrize("url", ["https://ru.hitmox.org/search?q=x&url=http://localhost", SEARCH + "&q=x",
     "https://ru.hitmox.org/search?q=", "https://evil.invalid/search?q=x", SEARCH.replace("https:", "http:"),
     "https://user:password@ru.hitmox.org/search?q=x", "https://ru.hitmox.org:8443/search?q=x",
@@ -234,11 +239,25 @@ def test_search_destinations_remain_bounded(url):
     assert not allowed_document(url, "", url)
 
 
-def test_search_request_gate_only_allows_the_exact_policy_checked_document():
+def test_search_request_gate_allows_only_the_exact_search_document():
     assert allowed_search_url(SEARCH)
     assert request_action(SEARCH, "Document", "GET", "main", "main", "", None, False, SEARCH) == "document"
     assert request_action(SEARCH, "Fetch", "GET", "main", "main", "", None, False, SEARCH) == "block"
     assert request_action(SEARCH + "x", "Document", "GET", "main", "main", "", None, False, SEARCH) == "block"
+    assert request_action("https://ru.hitmox.org/unapproved", "Document", "GET", "main", "main", "", None, False) == "block"
+
+
+def test_hitmos_media_hosts_must_resolve_only_to_public_addresses(monkeypatch):
+    monkeypatch.setattr("musicstream.audio_providers.hitmos_browser.socket.getaddrinfo",
+                        lambda *args, **kwargs: [(None, None, None, None, ("203.0.113.10", 443))])
+    assert not _host_resolves_publicly("media.example")  # TEST-NET address is reserved.
+    monkeypatch.setattr("musicstream.audio_providers.hitmos_browser.socket.getaddrinfo",
+                        lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443))])
+    assert _host_resolves_publicly("media.example")
+    monkeypatch.setattr("musicstream.audio_providers.hitmos_browser.socket.getaddrinfo",
+                        lambda *args, **kwargs: [(None, None, None, None, ("8.8.8.8", 443)),
+                                                 (None, None, None, None, ("127.0.0.1", 443))])
+    assert not _host_resolves_publicly("media.example")
 
 
 @pytest.mark.parametrize("app", [local_app, public_app])

@@ -23,8 +23,7 @@ async def audio_lifespan(app):
     async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, headers={"User-Agent": "MusicStream/0.1.0"}) as client:
         app.state.audio_providers = {
             "youtube": YouTubeProvider(BoundedSourceClient(client), os.getenv("YOUTUBE_API_KEY", "").strip() or None),
-            "hitmos": HitmosProvider(HitmosBrowserReader() if os.getenv("HITMOS_BROWSER_ENABLED") == "true" else None,
-                                     diagnostics_enabled=local_diagnostics),
+            "hitmos": HitmosProvider(HitmosBrowserReader(), diagnostics_enabled=local_diagnostics),
         }
         app.state.audio_limiter = ClientRateLimiter(limit=10)
         app.state.source_selection = SourceSelectionService(app.state.audio_providers)

@@ -1,0 +1,530 @@
+[
+  {
+    "query": "Rammstein Sonne",
+    "site": "https://ru.hitmox.org",
+    "status": "PLAY_STARTED",
+    "requests": [
+      {
+        "scheme": "https",
+        "host": "ru.hitmox.org",
+        "path_class": "/get/<audio>",
+        "resource_type": "media",
+        "method": "GET",
+        "has_range": true
+      },
+      {
+        "scheme": "https",
+        "host": "s4.deliciouspeaches.com",
+        "path_class": "/get/<audio>",
+        "resource_type": "media",
+        "method": "GET",
+        "has_range": false
+      }
+    ],
+    "audio_responses": [
+      {
+        "scheme": "https",
+        "host": "ru.hitmox.org",
+        "path_class": "/get/<audio>",
+        "status": 302,
+        "mime": "text/html",
+        "has_content_range": false,
+        "accept_ranges": ""
+      },
+      {
+        "scheme": "https",
+        "host": "s4.deliciouspeaches.com",
+        "path_class": "/get/<audio>",
+        "status": 206,
+        "mime": "audio/mpeg",
+        "has_content_range": true,
+        "accept_ranges": ""
+      }
+    ],
+    "inputs": [
+      {
+        "type": "text",
+        "name": "q",
+        "placeholder": "Поиск",
+        "aria": ""
+      }
+    ],
+    "chrome_before": {
+      "available": true,
+      "processes": 8,
+      "rss_mb": 418.3,
+      "cpu_seconds": 1.39
+    },
+    "page_status": 200,
+    "page_title": "Слушать и скачать музыку бесплатно: новинки Mp3 музыки - Hitmo",
+    "search_seconds": 1.676,
+    "candidates": [
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein, Clawfinger"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (RMX By Clawfinger) Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Clawfinger T.K.O. Remix) Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Live in Mexico City) Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Instrumental) Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Clawfinger T.K.O. Remix) Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Rammstein sonne (Speed up) PCN entertainment"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein, Clawfinger"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Made Popular By Rammstein) [Karaoke Version] Party Tyme Karaoke"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne Rammstein"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Rammstein sonne (Speed up) PCN entertainment"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Sonne (Made Popular By Rammstein) Party Tyme Karaoke"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "RAMMSTEIN SONNE Rovira"
+      }
+    ],
+    "selected": {
+      "facts": {
+        "scheme": "",
+        "host": "",
+        "path_class": "/song/<id>"
+      },
+      "text": "Sonne Rammstein"
+    },
+    "selected_song_id": "57658982",
+    "song_page_status": 1,
+    "song_page_title": "Результаты поиска: Rammstein Sonne",
+    "song_ready_seconds": 1.705,
+    "play_clicked": true,
+    "play_start_seconds": null,
+    "first_audio_response_seconds": 0.215,
+    "audio_state": {
+      "present": true,
+      "src_kind": "url",
+      "paused": false,
+      "ready_state": 4,
+      "network_state": 1,
+      "current_time": 5.94994,
+      "duration": 272.44,
+      "buffered_end": 266.215,
+      "media_source": false
+    },
+    "chrome_after": {
+      "available": true,
+      "processes": 10,
+      "rss_mb": 782.2,
+      "cpu_seconds": 6.41
+    },
+    "chrome_delta": {
+      "processes": 2,
+      "rss_mb": 363.9,
+      "cpu_seconds": 5.02
+    },
+    "observe_after_play_seconds": 12.396,
+    "audio_request_count": 2,
+    "audio_response_count": 2,
+    "delivery": "MP3",
+    "elapsed_seconds": 16.389
+  },
+  {
+    "query": "Ты не бойся ночи ENZRO",
+    "site": "https://ru.hitmox.org",
+    "status": "PLAY_STARTED",
+    "requests": [
+      {
+        "scheme": "https",
+        "host": "ru.hitmox.org",
+        "path_class": "/get/<audio>",
+        "resource_type": "media",
+        "method": "GET",
+        "has_range": true
+      },
+      {
+        "scheme": "https",
+        "host": "cdn3.deliciousoranges.com",
+        "path_class": "/get/<audio>",
+        "resource_type": "media",
+        "method": "GET",
+        "has_range": false
+      }
+    ],
+    "audio_responses": [
+      {
+        "scheme": "https",
+        "host": "ru.hitmox.org",
+        "path_class": "/get/<audio>",
+        "status": 302,
+        "mime": "text/html",
+        "has_content_range": false,
+        "accept_ranges": ""
+      },
+      {
+        "scheme": "https",
+        "host": "cdn3.deliciousoranges.com",
+        "path_class": "/get/<audio>",
+        "status": 206,
+        "mime": "audio/mpeg",
+        "has_content_range": true,
+        "accept_ranges": ""
+      }
+    ],
+    "inputs": [
+      {
+        "type": "text",
+        "name": "q",
+        "placeholder": "Поиск",
+        "aria": ""
+      }
+    ],
+    "chrome_before": {
+      "available": true,
+      "processes": 8,
+      "rss_mb": 421.2,
+      "cpu_seconds": 1.33
+    },
+    "page_status": 200,
+    "page_title": "Слушать и скачать музыку бесплатно: новинки Mp3 музыки - Hitmo",
+    "search_seconds": 1.679,
+    "candidates": [
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи Дима Билан, Тося Чайкина, ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи ENZRO,"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Hoodtrap Remix) (Remix) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Nightcore) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Enzro - Ты не бойся ночи РЕМИКС Noarix"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Speed Up) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Slowed) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Super Slowed) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Ultra Slowed) ENZRO"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Deep Mix) Enzro - Ты не бойся ночи (Deep Mix)"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи Enzro"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (Hoodtrap remix) ENZRO,"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи, ведь я рядом Enzro"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи (1). Enzro"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи vqMusic Enzro"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи Enzro"
+      },
+      {
+        "facts": {
+          "scheme": "",
+          "host": "",
+          "path_class": "/song/<id>"
+        },
+        "text": "Ты не бойся ночи ведь я рядом Enzro"
+      }
+    ],
+    "selected": {
+      "facts": {
+        "scheme": "",
+        "host": "",
+        "path_class": "/song/<id>"
+      },
+      "text": "Ты не бойся ночи Дима Билан, Тося Чайкина, ENZRO"
+    },
+    "selected_song_id": "82566825",
+    "song_page_status": 1,
+    "song_page_title": "Результаты поиска: Ты не бойся ночи ENZRO",
+    "song_ready_seconds": 1.709,
+    "play_clicked": true,
+    "play_start_seconds": 2.519,
+    "first_audio_response_seconds": 0.215,
+    "audio_state": {
+      "present": true,
+      "src_kind": "url",
+      "paused": false,
+      "ready_state": 4,
+      "network_state": 1,
+      "current_time": 2.09981,
+      "duration": 214.151837,
+      "buffered_end": 214.151837,
+      "media_source": false
+    },
+    "chrome_after": {
+      "available": true,
+      "processes": 11,
+      "rss_mb": 819.4,
+      "cpu_seconds": 6.97
+    },
+    "chrome_delta": {
+      "processes": 3,
+      "rss_mb": 398.2,
+      "cpu_seconds": 5.64
+    },
+    "observe_after_play_seconds": 4.825,
+    "audio_request_count": 2,
+    "audio_response_count": 2,
+    "delivery": "MP3",
+    "elapsed_seconds": 19.899
+  }
+]

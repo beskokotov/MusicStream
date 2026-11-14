@@ -14,6 +14,7 @@ from .track_matcher import TrackMatch, TrackReference, match_track, normalize, s
 _VERSIONS = {
     "live", "concert", "концерт", "remix", "ремикс", "acoustic", "акустика",
     "instrumental", "demo", "демо", "remaster", "remastered", "ремастер",
+    "deluxe", "anniversary", "reissue", "vinyl", "винил",
 }
 
 
@@ -84,7 +85,7 @@ def rank_releases(reference: TrackReference, releases: tuple[MusicRelease, ...],
             score *= 0.5
         if match and match.status in {"ambiguous", "unsupported"}:
             score *= 0.5
-        if artist >= 0.85 and (not reference.album or album >= 0.75) and version_match:
+        if artist >= 0.85 and (not reference.album or album >= 0.75 or song_hint >= 0.85) and version_match:
             eligible.add(release.source_id)
         ranked.append(RankedRelease(release, round(score, 3), match,
                                     f"artist={artist:.2f}; album={album:.2f}; "
@@ -94,7 +95,7 @@ def rank_releases(reference: TrackReference, releases: tuple[MusicRelease, ...],
     ranked.sort(key=lambda x: (-x.score, x.release.source_id))
     choices = [r for r in ranked if r.release.source_id in eligible
                and r.track_match and r.track_match.status == "matched"
-               and r.score >= 0.72]
+               and r.score >= (0.68 if not reference.album else 0.72)]
     if not choices:
         return ReleaseSelection(tuple(ranked), None, None, "no_verified_track")
     best = choices[0]

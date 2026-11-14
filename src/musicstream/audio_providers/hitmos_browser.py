@@ -1,11 +1,12 @@
 """Read metadata and the normal guest playback redirect; never fetch CDN audio."""
 
 import asyncio
+import ipaddress
 import re
+import socket
 import time
 from contextlib import suppress
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
-from urllib.robotparser import RobotFileParser
 
 from musicstream.audio_providers.base import ResolutionDiagnostics, SourceDocument
 from musicstream.audio_providers.hitmos import CDN_HOSTS, STREAM_PREFIXES, inspect_player_url, stream_format, valid_stream_url
@@ -35,29 +36,9 @@ def allowed_document(url: str, song_id: str, search_url: str | None = None) -> b
         return (parsed.scheme == "https" and parsed.hostname == "ru.hitmox.org"
                 and parsed.port in (None, 443) and not parsed.username and not parsed.password
                 and not parsed.query and not parsed.fragment
-                and parsed.path in {"/robots.txt", f"/song/{song_id}"})
+                and parsed.path == f"/song/{song_id}")
     except ValueError:
         return False
-
-
-def robots_allow_song(text: str, url: str) -> bool:
-    if not any(line.lower().strip().startswith("user-agent:") for line in text.splitlines()):
-        return False
-    policy = RobotFileParser()
-    policy.parse(text.splitlines())
-    if not policy.can_fetch("MusicStream", url):
-        return False
-    parsed = urlsplit(url)
-    path = parsed.path + ("?" + parsed.query if parsed.query else "")
-    for line in text.splitlines():
-        field, _, value = line.partition(":")
-        value = value.split("#", 1)[0].strip()
-        if field.strip().lower() == "disallow" and ("*" in value or "$" in value):
-            anchored = value.endswith("$")
-            pattern = re.escape(value.removesuffix("$")).replace(r"\*", ".*")
-            if re.search("^" + pattern + ("$" if anchored else ""), path):
-                return False
-    return True
 
 
 def request_action(url, resource_type, method, frame_id, main_frame_id, song_id, player_url, started, search_url=None):
@@ -87,6 +68,15 @@ def redirect_target(status: int, headers: list[dict], source_url: str, song_id: 
     except ValueError:
         pass
     return None
+
+
+def _host_resolves_publicly(host: str) -> bool:
+    """Reject an allowlisted media hostname if DNS points at a non-public IP."""
+    try:
+        addresses = {item[4][0] for item in socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)}
+        return bool(addresses) and all(ipaddress.ip_address(address).is_global for address in addresses)
+    except (OSError, ValueError):
+        return False
 
 
 class HitmosBrowserReader:
@@ -156,10 +146,7 @@ class HitmosBrowserReader:
                             try:
                                 if "responseStatusCode" in event or "responseErrorReason" in event:
                                     if event["resourceType"] == "Document" and allowed_document(request["url"], song_id, search_url):
-                                        if urlsplit(request["url"]).path == "/robots.txt":
-                                            diagnostics.robots_status = event.get("responseStatusCode")
-                                        else:
-                                            diagnostics.metadata_status = event.get("responseStatusCode")
+                                        diagnostics.metadata_status = event.get("responseStatusCode")
                                     # Inspect headers before receiving any response body or
                                     # following a redirect. Even a first-hop audio response
                                     # is aborted: this service resolves URLs, not audio bytes.
@@ -176,8 +163,18 @@ class HitmosBrowserReader:
                                                 diagnostics.redirect_host = "unapproved"
                                         target = redirect_target(event.get("responseStatusCode", 0),
                                                                  event.get("responseHeaders", []), request["url"], song_id)
+                                        if target:
+                                            host = urlsplit(target).hostname
+                                            try:
+                                                public_host = await asyncio.wait_for(
+                                                    asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
+                                            except TimeoutError:
+                                                public_host = False
+                                            if not public_host:
+                                                target = None
+                                                state["reason"] = "stream_host_not_public"
                                         diagnostics.redirect_valid = bool(target)
-                                        if not target:
+                                        if not target and not state["reason"]:
                                             status = event.get("responseStatusCode", 0)
                                             state["reason"] = "stream_redirect_not_allowed" if status in {301,302,303,307,308} else "stream_response_unexpected"
                                         if not resolution.done():
@@ -215,10 +212,7 @@ class HitmosBrowserReader:
                             received[0] = 0
                             response = await page.goto("https://ru.hitmox.org" + path,
                                                        wait_until="domcontentloaded", timeout=7000)
-                            if path == "/robots.txt":
-                                diagnostics.robots_status = response.status if response else None
-                            else:
-                                diagnostics.metadata_status = response.status if response else None
+                            diagnostics.metadata_status = response.status if response else None
                             if not response or response.status != 200 or response.url != "https://ru.hitmox.org" + path:
                                 raise SourceFailure("automated_access_denied")
                             body = await response.body()
@@ -226,10 +220,7 @@ class HitmosBrowserReader:
                                 raise SourceFailure("response_too_large")
                             return body.decode("utf-8", errors="strict")
 
-                        robots = await read("/robots.txt")
                         target_url = search_url or f"https://ru.hitmox.org/song/{song_id}"
-                        if not robots_allow_song(robots, target_url):
-                            raise SourceFailure("robots_disallowed")
                         target = urlsplit(target_url)
                         html = await read(target.path + ("?" + target.query if target.query else ""))
                         if metadata_only:
@@ -241,6 +232,14 @@ class HitmosBrowserReader:
                         if not player_url:
                             return result(html, reason="stream_not_found")
                         if urlsplit(player_url).hostname in CDN_HOSTS:
+                            host = urlsplit(player_url).hostname
+                            try:
+                                public_host = await asyncio.wait_for(
+                                    asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
+                            except TimeoutError:
+                                public_host = False
+                            if not public_host:
+                                return result(html, reason="stream_host_not_public")
                             return result(html, player_url)
                         state["player_url"] = player_url
                         # A normal metadata request gets the source-issued redirect.
@@ -268,5 +267,5 @@ class HitmosBrowserReader:
             except Exception as exc:
                 diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
                 stage = "source_search" if search_url else "stream_resolution" if diagnostics.metadata_status == 200 else "source_metadata"
-                reason = "robots_unavailable" if diagnostics.robots_status not in (None, 200) else "source_http_error" if diagnostics.metadata_status not in (None, 200) else "browser_unavailable"
+                reason = "source_http_error" if diagnostics.metadata_status not in (None, 200) else "browser_unavailable"
                 raise SourceFailure(reason, stage=stage, diagnostics=diagnostics) from exc

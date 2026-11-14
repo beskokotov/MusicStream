@@ -189,6 +189,7 @@ class HitmosProvider(AudioProvider):
                 ids = parse_search_ids(html)
                 recordings = []
                 failures = 0
+                exact_match = False
                 for song_id in ids[:3]:
                     try:
                         document = await self.reader.read_song(song_id, metadata_only=True)
@@ -196,20 +197,30 @@ class HitmosProvider(AudioProvider):
                         if len(html.encode("utf-8")) > 262144:
                             raise SourceFailure("response_too_large")
                         title, artist, duration = parse_song(html, song_id)
-                        recordings.append(DiscoveredRecording(id=song_id, title=title, artist=artist,
+                        candidate = DiscoveredRecording(id=song_id, title=title, artist=artist,
                             duration_seconds=duration, method="external_link",
-                            external_url=f"https://ru.hitmox.org/song/{song_id}"))
+                            external_url=f"https://ru.hitmox.org/song/{song_id}")
+                        if assess(recording, title, artist, duration).status == "likely":
+                            # Search results are relevance ordered. The first
+                            # exact title/artist/duration match is sufficient;
+                            # checking duplicate IDs adds latency without improving
+                            # the selected recording.
+                            recordings = [candidate]
+                            exact_match = True
+                            break
+                        recordings.append(candidate)
                     except SourceFailure:
                         failures += 1
                 result = DiscoveryBatch(source="hitmos", status="error" if failures and not recordings else "ok",
                     reason="candidates_found" if recordings else "candidate_metadata_failed" if failures else "no_results",
                     message="Метаданные найдены; поток будет проверен по Play." if recordings else
                             "Не удалось проверить метаданные найденных записей." if failures else "Hitmos не вернул кандидатов.",
-                    search_url=fallback.search_url, recordings=recordings, complete=not failures and len(ids) <= 3)
+                    search_url=fallback.search_url, recordings=recordings,
+                    complete=exact_match or (not failures and len(ids) <= 3))
             except SourceFailure as exc:
                 result = fallback.model_copy(update={"reason": exc.reason,
-                    "status": "blocked" if exc.reason == "robots_disallowed" else "error",
-                    "message": "Hitmos запрещает автоматический поиск в robots.txt. Кандидаты не запрашивались. Доступны исходный сайт и ручная проверка в разделе «Дополнительно»." if exc.reason == "robots_disallowed" else "Поиск Hitmos недоступен. Можно открыть исходный сайт или повторить позже.",
+                    "status": "error",
+                    "message": "Поиск Hitmos недоступен. Можно открыть исходный сайт или повторить позже.",
                     "diagnostics": exc.diagnostics if self.diagnostics_enabled else None})
             self._search_cache[key] = (self._clock() + (30 if result.status == "error" else 60), result.model_copy(deep=True))
             while len(self._search_cache) > 64:

@@ -14,9 +14,20 @@ class ResolutionDiagnostics(BaseModel):
     player_relative: bool = False
     player_valid: bool = False
     redirect_status: int | None = None
-    redirect_host: str | None = Field(default=None, pattern=r"^(ru\.hitmox\.org|cdn(?:11|13|14)\.deliciousoranges\.com|s4\.deliciouspeaches\.com|unapproved)$")
+    redirect_host: str | None = Field(default=None, pattern=r"^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|host_[a-f0-9]{12}|unapproved)$")
     redirect_format: Literal["cuts", "music", "missing", "unsupported"] = "missing"
+    redirect_route: Literal["get_cuts", "s1_get_cuts", "s2_get_cuts", "s3_get_cuts", "s4_get_cuts", "s5_get_cuts", "s6_get_cuts", "s7_get_cuts", "s8_get_cuts", "s9_get_cuts", "get_music", "s1_get_music", "s2_get_music", "s3_get_music", "s4_get_music", "s5_get_music", "s6_get_music", "s7_get_music", "s8_get_music", "s9_get_music", "other"] = "other"
     redirect_valid: bool = False
+    stage: Literal["source_search", "matching", "stream_resolution", "redirect", "proxy_connect", "http_range", "browser_playback"] | None = None
+    rejected_by: Literal["local_policy", "external_server", "network", "player"] | None = None
+    http_status: int | None = Field(default=None, ge=100, le=599)
+    retry_after_seconds: int | None = Field(default=None, ge=0, le=3600)
+    internal_code: str | None = Field(default=None, pattern=r"^[a-z0-9_]{1,64}$")
+    range_status: int | None = Field(default=None, ge=100, le=599)
+    content_type: Literal["audio", "octet_stream", "other"] | None = None
+    audio_signature_valid: bool | None = None
+    path_type: Literal["cuts", "music", "other"] | None = None
+    network_route: Literal["direct", "local_http_proxy"] | None = None
 
 
 @dataclass(frozen=True)
@@ -105,7 +116,7 @@ class SourceResult(BaseModel):
     message: str
     search_url: str
     candidates: list[AudioCandidate] = Field(default_factory=list)
-    stage: Literal["source_search", "source_metadata", "matching", "stream_resolution", "cdn_response", "browser_playback"] | None = None
+    stage: Literal["source_search", "source_metadata", "matching", "stream_resolution", "cdn_response", "proxy_connect", "http_range", "browser_playback"] | None = None
     diagnostics: ResolutionDiagnostics | None = None
     selection: Literal["none", "automatic", "choose"] = "none"
     selected_id: str | None = None

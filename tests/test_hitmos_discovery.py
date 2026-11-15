@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from musicstream.audio_providers.base import RecordingReference, SourceDocument
-from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids
+from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
 from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, request_action
 from musicstream.audio_providers.matching import assess
 from musicstream.audio_providers.transport import SourceFailure
@@ -30,7 +30,17 @@ class Reader:
         await asyncio.sleep(0)
         if self.error:
             raise SourceFailure(self.error, stage="source_search")
-        return SourceDocument("".join(f'<a href="/song/{i}">track</a>' for i in self.songs))
+        links = "".join(f'<a href="/song/{i}">track</a>' for i in self.songs)
+        metadata = []
+        for song_id, song in self.songs.items():
+            if song is None:
+                continue
+            title, artist, seconds = song
+            item = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                    "name": title, "byArtist": [{"name": artist}],
+                    "duration": f"PT{seconds}S" if seconds is not None else "unknown"}
+            metadata.append('<script type="application/ld+json">'+json.dumps(item)+'</script>')
+        return SourceDocument(links + "".join(metadata))
 
     async def read_song(self, song_id, *, metadata_only=False):
         self.calls.append((song_id, metadata_only))
@@ -49,32 +59,60 @@ def find(reader, reference=REF):
     return asyncio.run(HitmosProvider(reader).find(reference))
 
 
-def test_unique_exact_match_is_prepared_without_resolving_audio():
+def test_unique_exact_match_uses_search_metadata_without_opening_song_page():
     reader = Reader()
     result = find(reader)
     assert result.selection == "automatic" and result.selected_id == "1"
     assert result.candidates[0].selection_reason == "unique_high_confidence"
     assert result.candidates[0].stream_url is None
-    assert reader.calls == [("search", "Rammstein Sonne"), ("1", True)]
+    assert reader.calls == [("search", "Rammstein Sonne")]
     assert result.candidates[0].match.comparison.duration_difference_seconds == 0
 
 
-def test_play_resolves_fresh_address_with_the_existing_lookup():
+def test_play_resolves_only_the_selected_candidate_after_discovery():
     async def run():
         reader = Reader()
         provider = HitmosProvider(reader)
         discovered = await provider.find(REF)
-        result = await provider.lookup(REF, discovered.selected_id)
+        result = await provider.prepare(REF, discovered.selected_id)
         assert result.status == "available" and result.candidates[0].method == "html_audio"
-        assert reader.calls[-1] == ("1", False)
+        cached = await provider.prepare(REF, discovered.selected_id)
+        assert cached.status == "available"
+        assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
     asyncio.run(run())
 
 
-def test_duplicate_exact_matches_choose_first_ranked_hitmos_record():
+def test_missing_search_metadata_is_resolved_lazily_for_first_candidate():
+    class LinkOnlyReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            return SourceDocument('<a href="/song/1">Sonne</a>')
+
+    async def run():
+        reader = LinkOnlyReader()
+        provider = HitmosProvider(reader)
+        discovered = await provider.find(REF)
+        assert discovered.candidates[0].match.status == "uncertain"
+        assert reader.calls == [("search", "Rammstein Sonne")]
+        prepared = await provider.prepare(REF, discovered.candidates[0].id)
+        assert prepared.status == "available"
+        assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
+    asyncio.run(run())
+
+
+def test_search_embedded_track_metadata_is_used_without_page_navigation():
+    html = ('<a href="/song/91">Sonne</a>'
+            '<div data-musid="track-id-91" data-musmeta=\'{"title":"Sonne",'
+            '"artist":"Rammstein","duration_seconds":272}\'></div>')
+    assert parse_search_ids(html) == ["91"]
+    assert parse_search_metadata(html, ["91"]) == {"91": ("Sonne", "Rammstein", 272)}
+
+
+def test_duplicate_exact_matches_are_retained_for_playback_fallback():
     result = find(Reader({"1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272)}))
-    assert result.selection == "automatic" and result.selected_id == "1"
-    assert len(result.candidates) == 1
-    assert result.candidates[0].selection_reason == "unique_high_confidence"
+    assert result.selection == "choose" and result.selected_id is None
+    assert [candidate.id for candidate in result.candidates] == ["1", "2"]
+    assert all(candidate.match.status == "likely" for candidate in result.candidates)
 
 
 @pytest.mark.parametrize("version", ["Live", "Remix", "Radio Edit", "Explicit", "Clean"])
@@ -108,14 +146,18 @@ def test_explicit_true_needs_source_confirmation_and_false_is_not_clean():
 def test_partial_failure_or_truncated_search_disables_auto_choice():
     reader = Reader({"1": ("Sonne Live", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272), "3": None})
     result = find(reader)
-    assert result.selection == "automatic" and result.selected_id == "2"
-    assert len(reader.calls) == 3  # search, rejected Live result, exact studio recording
+    assert result.selection == "choose" and result.selected_id is None
+    exact = next(candidate for candidate in result.candidates if candidate.id == "2")
+    assert exact.match.status == "likely"
+    assert len(reader.calls) == 1  # search metadata is enough for discovery
 
 
-def test_empty_result_and_source_errors_are_distinct():
+def test_empty_result_errors_and_candidates_without_search_metadata_are_distinct():
     assert find(Reader({})).reason == "no_results"
     assert find(Reader(error="source_http_error")).status == "error"
-    assert find(Reader({"1": None})).reason == "candidate_metadata_failed"
+    unresolved = find(Reader({"1": None}))
+    assert unresolved.reason == "ambiguous_candidates"
+    assert unresolved.candidates[0].match.status == "uncertain"
 
 
 def test_bounded_ttl_cache_coalesces_concurrent_discovery_and_returns_copies():
@@ -125,12 +167,12 @@ def test_bounded_ttl_cache_coalesces_concurrent_discovery_and_returns_copies():
         now = [0.0]
         provider._clock = lambda: now[0]
         results = await asyncio.gather(*(provider.find(REF) for _ in range(8)))
-        assert len(reader.calls) == 2
+        assert len(reader.calls) == 1
         results[0].candidates.clear()
         assert len((await provider.find(REF)).candidates) == 1
         now[0] = 61
         await provider.find(REF)
-        assert len(reader.calls) == 4
+        assert len(reader.calls) == 2
         for i in range(70):
             await provider.find(REF.model_copy(update={"title": f"Song {i}"}))
         assert len(provider._search_cache) == 64
@@ -157,22 +199,21 @@ def test_browser_search_fetches_query_without_loading_media(monkeypatch):
 
     page = SimpleNamespace(goto=goto, evaluate=AsyncMock(), close=AsyncMock())
     cdp = SimpleNamespace(send=AsyncMock(return_value={"frameTree": {"frame": {"id": "main"}}}), on=Mock())
-    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp))
-    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
-    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
-
-    @asynccontextmanager
-    async def fake_runtime():
-        yield runtime
-
-    monkeypatch.setattr(api, "async_playwright", fake_runtime)
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp), close=AsyncMock())
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock(), is_connected=Mock(return_value=True))
+    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)), stop=AsyncMock())
+    monkeypatch.setattr(api, "async_playwright", lambda: SimpleNamespace(start=AsyncMock(return_value=runtime)))
 
     async def run():
         reader = HitmosBrowserReader()
         result = await reader.read_search("Rammstein Sonne")
+        await reader.read_search("Rammstein Sonne")
         assert parse_search_ids(result.html) == ["1"]
-        assert visited == [SEARCH]
+        assert visited == [SEARCH, SEARCH]
         page.evaluate.assert_not_called()
+        runtime.chromium.launch.assert_awaited_once()
+        assert context.close.await_count == 2
+        await reader.close()
         browser.close.assert_awaited_once()
     asyncio.run(run())
 
@@ -187,22 +228,42 @@ def test_browser_search_reports_http_denial_without_retrying_or_challenge_bypass
 
     page = SimpleNamespace(goto=goto, evaluate=AsyncMock(), close=AsyncMock())
     cdp = SimpleNamespace(send=AsyncMock(return_value={"frameTree": {"frame": {"id": "main"}}}), on=Mock())
-    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp))
-    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
-    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
-
-    @asynccontextmanager
-    async def fake_runtime():
-        yield runtime
-
-    monkeypatch.setattr(api, "async_playwright", fake_runtime)
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp), close=AsyncMock())
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock(), is_connected=Mock(return_value=True))
+    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)), stop=AsyncMock())
+    monkeypatch.setattr(api, "async_playwright", lambda: SimpleNamespace(start=AsyncMock(return_value=runtime)))
 
     async def run():
+        reader = HitmosBrowserReader()
         with pytest.raises(SourceFailure) as error:
-            await HitmosBrowserReader().read_search("Rammstein Sonne")
+            await reader.read_search("Rammstein Sonne")
         assert error.value.reason == "automated_access_denied"
         assert visited == [SEARCH]
+        await reader.close()
         browser.close.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_browser_aborted_navigation_is_network_failure_and_closes_context(monkeypatch):
+    api = pytest.importorskip("playwright.async_api")
+    from playwright.async_api import Error as PlaywrightError
+
+    page = SimpleNamespace(goto=AsyncMock(side_effect=PlaywrightError("Page.goto: net::ERR_ABORTED")))
+    cdp = SimpleNamespace(send=AsyncMock(return_value={"frameTree": {"frame": {"id": "main"}}}), on=Mock())
+    context = SimpleNamespace(new_page=AsyncMock(return_value=page), new_cdp_session=AsyncMock(return_value=cdp), close=AsyncMock())
+    browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock(), is_connected=Mock(return_value=True))
+    runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)), stop=AsyncMock())
+    monkeypatch.setattr(api, "async_playwright", lambda: SimpleNamespace(start=AsyncMock(return_value=runtime)))
+
+    async def run():
+        reader = HitmosBrowserReader()
+        with pytest.raises(SourceFailure) as error:
+            await reader.read_search("Rammstein Sonne")
+        assert error.value.reason == "source_network_error"
+        context.close.assert_awaited_once()
+        await reader.close()
+        browser.close.assert_awaited_once()
+
     asyncio.run(run())
 
 

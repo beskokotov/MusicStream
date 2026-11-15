@@ -1,7 +1,9 @@
 """Read metadata and the normal guest playback redirect; never fetch CDN audio."""
 
 import asyncio
+import hashlib
 import ipaddress
+import logging
 import re
 import socket
 import time
@@ -11,8 +13,11 @@ from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 from musicstream.audio_providers.base import ResolutionDiagnostics, SourceDocument
 from musicstream.audio_providers.hitmos import CDN_HOSTS, STREAM_PREFIXES, inspect_player_url, stream_format, valid_stream_url
 from musicstream.audio_providers.transport import SourceFailure
+from musicstream.audio_providers.hitmos_stream import validated_audio_url, retry_after_seconds
+from musicstream.audio_providers.hitmos_proxy_config import configured_hitmos_proxy
 from musicstream.public_rate_limit import ClientRateLimiter
 
+logger = logging.getLogger(__name__)
 
 def allowed_search_url(url: str) -> bool:
     try:
@@ -55,7 +60,7 @@ def request_action(url, resource_type, method, frame_id, main_frame_id, song_id,
     return "block"
 
 
-def redirect_target(status: int, headers: list[dict], source_url: str, song_id: str) -> str | None:
+def redirect_target(status: int, headers: list[dict], source_url: str, song_id: str, *, lab_mode=False) -> str | None:
     if status not in {301, 302, 303, 307, 308}:
         return None
     locations = [header["value"] for header in headers if header["name"].lower() == "location"]
@@ -63,7 +68,8 @@ def redirect_target(status: int, headers: list[dict], source_url: str, song_id: 
         return None
     try:
         target = urljoin(source_url, locations[0])
-        if valid_stream_url(target, song_id) and urlsplit(target).hostname in CDN_HOSTS:
+        if ((valid_stream_url(target, song_id) and urlsplit(target).hostname in CDN_HOSTS)
+                or (lab_mode and validated_audio_url(target))):
             return target
     except ValueError:
         pass
@@ -82,9 +88,42 @@ def _host_resolves_publicly(host: str) -> bool:
 class HitmosBrowserReader:
     MAX_BYTES = 262144
 
-    def __init__(self):
+    def __init__(self, *, diagnostics_enabled=False, lab_mode=False, request_limit=5, proxy_url=None):
         self._gate = asyncio.Semaphore(1)
-        self._budget = ClientRateLimiter(limit=5)
+        self._budget = ClientRateLimiter(limit=request_limit)
+        self.diagnostics_enabled = diagnostics_enabled
+        self.lab_mode = bool(lab_mode)
+        self.proxy_url = configured_hitmos_proxy() if proxy_url is None else proxy_url
+        self._runtime = None
+        self._browser = None
+
+    async def close(self):
+        async with self._gate:
+            try:
+                if self._browser is not None:
+                    await self._browser.close()
+            finally:
+                self._browser = None
+                if self._runtime is not None:
+                    await self._runtime.stop()
+                    self._runtime = None
+
+    async def _get_browser(self, async_playwright):
+        if self._browser is not None and self._browser.is_connected():
+            return self._browser
+        if self._runtime is not None:
+            await self._runtime.stop()
+        self._runtime = await async_playwright().start()
+        try:
+            options = {"channel": "chrome", "headless": True, "timeout": 5000}
+            if self.proxy_url:
+                options["proxy"] = {"server": self.proxy_url}
+            self._browser = await self._runtime.chromium.launch(**options)
+        except BaseException:
+            await self._runtime.stop()
+            self._runtime = None
+            raise
+        return self._browser
 
     async def read_song(self, song_id: str, *, metadata_only=False) -> SourceDocument:
         return await self._read(song_id, metadata_only=metadata_only)
@@ -98,6 +137,7 @@ class HitmosBrowserReader:
     async def _read(self, song_id: str, *, search_url=None, metadata_only=False) -> SourceDocument:
         started_at = time.monotonic()
         diagnostics = ResolutionDiagnostics()
+        diagnostics.network_route = "local_http_proxy" if self.proxy_url else "direct"
 
         def result(html, stream_url=None, reason=None):
             diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
@@ -108,164 +148,255 @@ class HitmosBrowserReader:
         if self._budget.check("browser") is not None:
             raise SourceFailure("request_budget_exhausted", stage="source_metadata", diagnostics=diagnostics)
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
         except ImportError as exc:
             raise SourceFailure("browser_not_installed", stage="source_metadata", diagnostics=diagnostics) from exc
+        navigation_failure = [None]
+        oversized = [False]
         async with self._gate:
             try:
-                async with async_playwright() as runtime:
-                    browser = await runtime.chromium.launch(channel="chrome", headless=True, timeout=5000)
-                    try:
-                        context = await browser.new_context(java_script_enabled=False, accept_downloads=False,
+                browser = await self._get_browser(async_playwright)
+                context = None
+                try:
+                    context = await browser.new_context(java_script_enabled=False, accept_downloads=False,
                                                             user_agent="MusicStream/0.1.0")
-                        page = await context.new_page()
-                        cdp = await context.new_cdp_session(page)
-                        await cdp.send("Network.enable")
-                        await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
-                        main_frame = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
-                        resolution = asyncio.get_running_loop().create_future()
-                        state = {"player_url": None, "started": False, "player_request_id": None, "reason": None}
-                        received = [0]
-                        oversized = [False]
-                        documents = set()
+                    page = await context.new_page()
+                    cdp = await context.new_cdp_session(page)
+                    await cdp.send("Network.enable")
+                    await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
+                    main_frame = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
+                    resolution = asyncio.get_running_loop().create_future()
+                    state = {"player_url": None, "started": False, "player_request_id": None, "reason": None}
+                    received = [0]
+                    documents = set()
 
-                        def track_request(event):
-                            if event.get("type") == "Document":
-                                documents.add(event["requestId"])
+                    def track_request(event):
+                        if event.get("type") == "Document":
+                            documents.add(event["requestId"])
 
-                        def count_bytes(event):
-                            if event["requestId"] not in documents:
-                                return
-                            received[0] += event.get("dataLength", 0)
-                            if received[0] > self.MAX_BYTES and not oversized[0]:
-                                oversized[0] = True
-                                asyncio.create_task(page.close())
+                    def track_failure(event):
+                        if self.diagnostics_enabled and event.get("requestId") in documents:
+                            logger.warning("Hitmos document load failed: error=%s blocked=%s canceled=%s",
+                                           event.get("errorText"), event.get("blockedReason"), event.get("canceled"))
+                        if event.get("requestId") in documents:
+                            navigation_failure[0] = event.get("errorText")
 
-                        async def paused(event):
-                            request = event["request"]
-                            try:
-                                if "responseStatusCode" in event or "responseErrorReason" in event:
-                                    if event["resourceType"] == "Document" and allowed_document(request["url"], song_id, search_url):
-                                        diagnostics.metadata_status = event.get("responseStatusCode")
-                                    # Inspect headers before receiving any response body or
-                                    # following a redirect. Even a first-hop audio response
-                                    # is aborted: this service resolves URLs, not audio bytes.
-                                    if event["requestId"] == state["player_request_id"]:
-                                        diagnostics.redirect_status = event.get("responseStatusCode")
-                                        locations = [h["value"] for h in event.get("responseHeaders", []) if h["name"].lower() == "location"]
-                                        if len(locations) == 1:
-                                            try:
-                                                target_url = urljoin(request["url"], locations[0])
-                                                host = urlsplit(target_url).hostname
-                                                diagnostics.redirect_host = host if host in STREAM_PREFIXES else "unapproved"
-                                                diagnostics.redirect_format = stream_format(target_url)
-                                            except ValueError:
-                                                diagnostics.redirect_host = "unapproved"
-                                        target = redirect_target(event.get("responseStatusCode", 0),
-                                                                 event.get("responseHeaders", []), request["url"], song_id)
-                                        if target:
-                                            host = urlsplit(target).hostname
-                                            try:
-                                                public_host = await asyncio.wait_for(
-                                                    asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
-                                            except TimeoutError:
-                                                public_host = False
-                                            if not public_host:
-                                                target = None
-                                                state["reason"] = "stream_host_not_public"
-                                        diagnostics.redirect_valid = bool(target)
-                                        if not target and not state["reason"]:
-                                            status = event.get("responseStatusCode", 0)
-                                            state["reason"] = "stream_redirect_not_allowed" if status in {301,302,303,307,308} else "stream_response_unexpected"
-                                        if not resolution.done():
-                                            resolution.set_result(target)
-                                    elif (event["resourceType"] == "Document" and event.get("responseStatusCode") == 200
-                                          and allowed_document(request["url"], song_id, search_url)):
-                                        await cdp.send("Fetch.continueResponse", {"requestId": event["requestId"]})
-                                        return
-                                    await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "Aborted"})
-                                    return
-                                action = request_action(request["url"], event["resourceType"], request["method"],
-                                                        event.get("frameId"), main_frame, song_id,
-                                                        state["player_url"], state["started"], search_url)
-                                if action in {"document", "player"}:
-                                    if action == "player":
-                                        state["started"] = True
-                                        state["player_request_id"] = event["requestId"]
-                                    # Keep the browser's normal headers and guest session.
-                                    await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"], "interceptResponse": True})
-                                else:
-                                    if event["resourceType"] == "Media" and state["started"] and not resolution.done():
-                                        state["reason"] = "stream_redirect_not_allowed"
-                                        resolution.set_result(None)
-                                    await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "Aborted"})
-                            except Exception:
-                                if not resolution.done():
-                                    resolution.set_result(None)
+                    def count_bytes(event):
+                        if event["requestId"] not in documents:
+                            return
+                        received[0] += event.get("dataLength", 0)
+                        if received[0] > self.MAX_BYTES and not oversized[0]:
+                            oversized[0] = True
+                            if self.diagnostics_enabled:
+                                logger.warning("Hitmos document exceeded size limit (%s bytes)", received[0])
+                            asyncio.create_task(page.close())
 
-                        cdp.on("Network.requestWillBeSent", track_request)
-                        cdp.on("Network.dataReceived", count_bytes)
-                        cdp.on("Fetch.requestPaused", paused)
-                        await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
-
-                        async def read(path):
-                            received[0] = 0
-                            response = await page.goto("https://ru.hitmox.org" + path,
-                                                       wait_until="domcontentloaded", timeout=7000)
-                            diagnostics.metadata_status = response.status if response else None
-                            if not response or response.status != 200 or response.url != "https://ru.hitmox.org" + path:
-                                raise SourceFailure("automated_access_denied")
-                            body = await response.body()
-                            if oversized[0] or len(body) > self.MAX_BYTES:
-                                raise SourceFailure("response_too_large")
-                            return body.decode("utf-8", errors="strict")
-
-                        target_url = search_url or f"https://ru.hitmox.org/song/{song_id}"
-                        target = urlsplit(target_url)
-                        html = await read(target.path + ("?" + target.query if target.query else ""))
-                        if metadata_only:
-                            return result(html)
-                        player_url, inspection = inspect_player_url(html, song_id)
-                        diagnostics.player_format = inspection.player_format
-                        diagnostics.player_relative = inspection.player_relative
-                        diagnostics.player_valid = inspection.player_valid
-                        if not player_url:
-                            return result(html, reason="stream_not_found")
-                        if urlsplit(player_url).hostname in CDN_HOSTS:
-                            host = urlsplit(player_url).hostname
-                            try:
-                                public_host = await asyncio.wait_for(
-                                    asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
-                            except TimeoutError:
-                                public_host = False
-                            if not public_host:
-                                return result(html, reason="stream_host_not_public")
-                            return result(html, player_url)
-                        state["player_url"] = player_url
-                        # A normal metadata request gets the source-issued redirect.
-                        # The redirect response is aborted before a CDN request.
-                        await page.evaluate("""url => {
-                            const audio = document.createElement('audio');
-                            audio.preload = 'metadata'; audio.src = url;
-                            document.body.append(audio); audio.load();
-                        }""", player_url)
+                    async def paused(event):
+                        request = event["request"]
                         try:
-                            stream_url = await asyncio.wait_for(asyncio.shield(resolution), timeout=3)
+                            if "responseStatusCode" in event or "responseErrorReason" in event:
+                                if self.diagnostics_enabled and event["resourceType"] == "Document":
+                                    logger.warning("Hitmos document response: status=%s error=%s", event.get("responseStatusCode"), event.get("responseErrorReason"))
+                                if event["resourceType"] == "Document" and allowed_document(request["url"], song_id, search_url):
+                                    diagnostics.metadata_status = event.get("responseStatusCode")
+                                    if self.diagnostics_enabled:
+                                        logger.info("Hitmos document response status %s", diagnostics.metadata_status)
+                                # Inspect headers before receiving any response body or
+                                # following a redirect. Even a first-hop audio response
+                                # is aborted: this service resolves URLs, not audio bytes.
+                                if event["requestId"] == state["player_request_id"]:
+                                    diagnostics.redirect_status = event.get("responseStatusCode")
+                                    locations = [h["value"] for h in event.get("responseHeaders", []) if h["name"].lower() == "location"]
+                                    if len(locations) == 1:
+                                        try:
+                                            target_url = urljoin(request["url"], locations[0])
+                                            host = urlsplit(target_url).hostname
+                                            diagnostics.redirect_host = ("host_" + hashlib.sha256(host.lower().encode()).hexdigest()[:12]
+                                                if self.lab_mode and host else host if host and re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*", host) else "unapproved")
+                                            diagnostics.redirect_format = stream_format(target_url)
+                                            route_match = re.match(r"^/(s[1-9]/)?get/(cuts|music)/", urlsplit(target_url).path)
+                                            diagnostics.redirect_route = ((route_match[1][:-1] + "_" if route_match[1] else "")
+                                                                          + "get_" + route_match[2] if route_match else "other")
+                                        except ValueError:
+                                            diagnostics.redirect_host = "unapproved"
+                                    status = event.get("responseStatusCode")
+                                    if status == 429:
+                                        retry_value = next((h["value"] for h in event.get("responseHeaders", [])
+                                                            if h["name"].lower() == "retry-after"), None)
+                                        state["reason"] = "upstream_rate_limited"
+                                        state["failure"] = {"owner": "external_server", "status": 429,
+                                                             "retry_after": retry_after_seconds(retry_value)}
+                                        diagnostics.stage = "stream_resolution"
+                                        diagnostics.rejected_by = "external_server"
+                                        diagnostics.http_status = 429
+                                        diagnostics.retry_after_seconds = state["failure"]["retry_after"]
+                                        diagnostics.internal_code = "upstream_rate_limited"
+                                    elif status and status >= 400:
+                                        state["reason"] = f"hitmos_http_{status}"
+                                        diagnostics.stage = "stream_resolution"
+                                        diagnostics.rejected_by = "external_server"
+                                        diagnostics.http_status = status
+                                        diagnostics.internal_code = f"hitmos_http_{status}"
+                                    elif status and status not in {301, 302, 303, 307, 308}:
+                                        state["reason"] = "stream_response_unexpected"
+                                        diagnostics.stage = "stream_resolution"
+                                        diagnostics.rejected_by = "external_server"
+                                        diagnostics.http_status = status
+                                        diagnostics.internal_code = "stream_response_unexpected"
+                                    target = redirect_target(status or 0, event.get("responseHeaders", []),
+                                                             request["url"], song_id, lab_mode=self.lab_mode)
+                                    if (not target and diagnostics.redirect_host
+                                            and diagnostics.redirect_host not in STREAM_PREFIXES
+                                            and diagnostics.redirect_host != "unapproved"):
+                                            logger.warning("Hitmos unapproved redirect host=%s route=%s status=%s",
+                                                       diagnostics.redirect_host, diagnostics.redirect_route,
+                                                       diagnostics.redirect_status)
+                                    if target:
+                                        host = urlsplit(target).hostname
+                                        try:
+                                            public_host = await asyncio.wait_for(
+                                                asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
+                                        except TimeoutError:
+                                            public_host = False
+                                        if not public_host:
+                                            target = None
+                                            state["reason"] = "stream_host_not_public"
+                                    diagnostics.redirect_valid = bool(target)
+                                    if not target and not state["reason"]:
+                                        status = event.get("responseStatusCode", 0)
+                                        state["reason"] = "stream_redirect_not_allowed" if status in {301,302,303,307,308} else "stream_response_unexpected"
+                                    if not resolution.done():
+                                        resolution.set_result(target)
+                                elif (event["resourceType"] == "Document" and event.get("responseStatusCode") == 200
+                                      and allowed_document(request["url"], song_id, search_url)):
+                                    await cdp.send("Fetch.continueResponse", {"requestId": event["requestId"]})
+                                    return
+                                await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "Aborted"})
+                                return
+                            action = request_action(request["url"], event["resourceType"], request["method"],
+                                                    event.get("frameId"), main_frame, song_id,
+                                                    state["player_url"], state["started"], search_url)
+                            if self.diagnostics_enabled and event["resourceType"] == "Document":
+                                logger.warning("Hitmos document request: action=%s", action)
+                            if action in {"document", "player"}:
+                                if action == "player":
+                                    state["started"] = True
+                                    state["player_request_id"] = event["requestId"]
+                                # Keep the browser's normal headers and guest session.
+                                await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"], "interceptResponse": True})
+                            else:
+                                if self.diagnostics_enabled and event["resourceType"] == "Document":
+                                    reason = "main_frame_mismatch" if event.get("frameId") != main_frame else "document_outside_allowlist"
+                                    logger.warning("Hitmos document request rejected (%s)", reason)
+                                if event["resourceType"] == "Media" and state["started"] and not resolution.done():
+                                    state["reason"] = "stream_redirect_not_allowed"
+                                    resolution.set_result(None)
+                                await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "Aborted"})
+                        except Exception as exc:
+                            if self.diagnostics_enabled:
+                                logger.warning("Hitmos CDP request handling failed (%s)", type(exc).__name__)
+                            if not resolution.done():
+                                resolution.set_result(None)
+
+                    cdp.on("Network.requestWillBeSent", track_request)
+                    cdp.on("Network.loadingFailed", track_failure)
+                    cdp.on("Network.dataReceived", count_bytes)
+                    cdp.on("Fetch.requestPaused", paused)
+                    await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+
+                    async def read(path):
+                        received[0] = 0
+                        response = await page.goto("https://ru.hitmox.org" + path,
+                                                   wait_until="domcontentloaded", timeout=7000)
+                        diagnostics.metadata_status = response.status if response else None
+                        if not response or response.status != 200 or response.url != "https://ru.hitmox.org" + path:
+                            status = response.status if response else diagnostics.metadata_status
+                            retry_after = getattr(response, "headers", {}).get("retry-after") if response else None
+                            code = ("upstream_rate_limited" if status == 429 else
+                                    "automated_access_denied" if status == 403 else
+                                    "hitmos_http_error" if status else "automated_access_denied")
+                            raise SourceFailure(code,
+                                owner="external_server" if status else "network", http_status=status,
+                                retry_after_seconds=retry_after_seconds(retry_after),
+                                stage="source_search" if search_url else "source_metadata")
+                        body = await response.body()
+                        if oversized[0] or len(body) > self.MAX_BYTES:
+                            raise SourceFailure("response_too_large")
+                        return body.decode("utf-8", errors="strict")
+
+                    target_url = search_url or f"https://ru.hitmox.org/song/{song_id}"
+                    target = urlsplit(target_url)
+                    html = await read(target.path + ("?" + target.query if target.query else ""))
+                    if metadata_only:
+                        return result(html)
+                    player_url, inspection = inspect_player_url(html, song_id, lab_mode=self.lab_mode)
+                    diagnostics.player_format = inspection.player_format
+                    diagnostics.player_relative = inspection.player_relative
+                    diagnostics.player_valid = inspection.player_valid
+                    if not player_url:
+                        return result(html, reason="stream_not_found")
+                    if urlsplit(player_url).hostname in CDN_HOSTS:
+                        host = urlsplit(player_url).hostname
+                        try:
+                            public_host = await asyncio.wait_for(
+                                asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
                         except TimeoutError:
-                            stream_url = None
-                            state["reason"] = "stream_redirect_unavailable"
-                        with suppress(Exception):
-                            await page.evaluate("document.querySelectorAll('audio').forEach(a => {a.pause();a.removeAttribute('src');a.load();})")
-                        return result(html, stream_url, state["reason"])
-                    finally:
-                        await browser.close()
+                            public_host = False
+                        if not public_host:
+                            return result(html, reason="stream_host_not_public")
+                        return result(html, player_url)
+                    if self.lab_mode and validated_audio_url(player_url):
+                        return result(html, player_url)
+                    state["player_url"] = player_url
+                    # A normal metadata request gets the source-issued redirect.
+                    # The redirect response is aborted before a CDN request.
+                    await page.evaluate("""url => {
+                        const audio = document.createElement('audio');
+                        audio.preload = 'metadata'; audio.src = url;
+                        document.body.append(audio); audio.load();
+                    }""", player_url)
+                    try:
+                        stream_url = await asyncio.wait_for(asyncio.shield(resolution), timeout=3)
+                    except TimeoutError:
+                        stream_url = None
+                        state["reason"] = "stream_redirect_unavailable"
+                    with suppress(Exception):
+                        await page.evaluate("document.querySelectorAll('audio').forEach(a => {a.pause();a.removeAttribute('src');a.load();})")
+                    return result(html, stream_url, state["reason"])
+                finally:
+                    if context is not None:
+                        await context.close()
             except SourceFailure as exc:
                 diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
                 exc.diagnostics = diagnostics
                 exc.stage = "source_search" if search_url else exc.stage or "source_metadata"
+                if diagnostics.internal_code is None:
+                    diagnostics.stage = exc.stage
+                    diagnostics.internal_code = exc.reason
+                    diagnostics.rejected_by = exc.owner
+                    diagnostics.http_status = exc.http_status
+                    diagnostics.retry_after_seconds = exc.retry_after_seconds
                 raise
             except Exception as exc:
                 diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
+                if self.diagnostics_enabled:
+                    # Keep enough detail for local fault isolation while removing
+                    # URLs, credential-like fields and IP addresses from logs.
+                    safe_error = re.sub(r"https?://[^\s'\"<>]+", "[URL]", str(exc))
+                    safe_error = re.sub(
+                        r"(?i)\b(api[_-]?key|token|secret|password|authorization|cookie)\b(?:\s*[:=]\s*|\s+)[^\s]+",
+                        r"\1=[REDACTED]", safe_error)
+                    safe_error = re.sub(r"\b(?:\d{1,3}\.){3}\d{1,3}\b", "[IP]", safe_error)
+                    logger.warning("Hitmos browser operation failed (%s): %s",
+                                   type(exc).__name__, " ".join(safe_error.split())[:500])
                 stage = "source_search" if search_url else "stream_resolution" if diagnostics.metadata_status == 200 else "source_metadata"
-                reason = "source_http_error" if diagnostics.metadata_status not in (None, 200) else "browser_unavailable"
-                raise SourceFailure(reason, stage=stage, diagnostics=diagnostics) from exc
+                reason = ("response_too_large" if oversized[0]
+                          else "source_http_error" if diagnostics.metadata_status not in (None, 200)
+                          else "source_timeout" if isinstance(exc, (TimeoutError, PlaywrightTimeoutError))
+                          else "source_network_error" if navigation_failure[0] or "ERR_ABORTED" in str(exc)
+                          else "browser_unavailable")
+                diagnostics.stage = stage
+                diagnostics.internal_code = reason
+                diagnostics.rejected_by = "external_server" if diagnostics.metadata_status not in (None, 200) else "network"
+                raise SourceFailure(reason, stage=stage, diagnostics=diagnostics,
+                    owner=diagnostics.rejected_by, http_status=diagnostics.metadata_status) from exc

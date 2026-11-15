@@ -12,6 +12,7 @@ ID = "81423717"
 PATH = f"/get/cuts/ab/cd/{'a' * 32}/{ID}/Artist_-_Song_b128.mp3"
 PLAYER = "https://ru.hitmox.org" + PATH
 CDN = "https://cdn13.deliciousoranges.com/s1" + PATH
+CDN7 = "https://cdn7.deliciousoranges.com/s2" + PATH
 REF = RecordingReference(title="Song", artist="Artist", duration_seconds=219)
 
 
@@ -82,6 +83,8 @@ def test_browser_request_gate_blocks_ssrf_subframes_assets_and_cdn_networking(ur
 def test_source_issued_cdn_redirect_is_validated(status):
     assert redirect_target(status,[{"name":"Location","value":CDN}],PLAYER,ID) == CDN
     assert valid_stream_url(CDN,ID)
+    assert redirect_target(status,[{"name":"Location","value":CDN7}],PLAYER,ID) == CDN7
+    assert valid_stream_url(CDN7,ID)
 
 
 @pytest.mark.parametrize("location", ["/song/81423717", "http://127.0.0.1/private",

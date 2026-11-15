@@ -10,10 +10,18 @@ import httpx
 
 
 class SourceFailure(Exception):
-    def __init__(self, reason: str, *, stage=None, diagnostics=None):
+    def __init__(self, reason: str, *, stage=None, diagnostics=None, owner=None,
+                 http_status=None, retry_after_seconds=None, host=None, path_type=None):
         self.reason = reason
         self.stage = stage
         self.diagnostics = diagnostics
+        self.owner = owner
+        self.http_status = http_status
+        self.retry_after_seconds = retry_after_seconds
+        # Host is intentionally reduced to a DNS-safe label and path_type is
+        # a category, never a source URL, path, query, or signed token.
+        self.host = host if isinstance(host, str) and len(host) <= 253 else None
+        self.path_type = path_type if path_type in {"cuts", "music", "other"} else None
 
 
 class BoundedSourceClient:

@@ -4,11 +4,11 @@ from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Path, Query, Request
 from fastapi.staticfiles import StaticFiles
 
 from musicstream.providers.base import Track
-from musicstream.search_service import provider_lifespan, search_tracks
+from musicstream.search_service import call_deezer_catalog, provider_lifespan, search_tracks
 from musicstream.web import STATIC_DIR, router as web_router
 from musicstream.audio_providers.routes import router as audio_router
 
@@ -186,3 +186,48 @@ async def search(
     provider: Annotated[Literal["deezer", "musicbrainz"], Query()] = "deezer",
 ):
     return await search_tracks(request, q, limit, provider)
+
+
+@app.get("/api/catalog/artists")
+async def search_artists(
+    request: Request,
+    q: Annotated[str, Query(min_length=1, max_length=200)],
+    limit: Annotated[int, Query(ge=1, le=25)] = 10,
+):
+    return await call_deezer_catalog(request, "search_artists", q.strip(), limit)
+
+
+@app.get("/api/catalog/artists/{artist_id}")
+async def artist_detail(request: Request, artist_id: Annotated[int, Path(ge=1, le=2**63 - 1)]):
+    return await call_deezer_catalog(request, "artist", artist_id)
+
+
+@app.get("/api/catalog/artists/{artist_id}/top")
+async def artist_top(
+    request: Request, artist_id: Annotated[int, Path(ge=1, le=2**63 - 1)],
+    limit: Annotated[int, Query(ge=1, le=50)] = 10,
+):
+    return await call_deezer_catalog(request, "artist_top", artist_id, limit)
+
+
+@app.get("/api/catalog/artists/{artist_id}/releases")
+async def artist_releases(
+    request: Request, artist_id: Annotated[int, Path(ge=1, le=2**63 - 1)],
+    index: Annotated[int, Query(ge=0, le=100000)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    return await call_deezer_catalog(request, "artist_albums", artist_id, index, limit)
+
+
+@app.get("/api/catalog/albums/{album_id}")
+async def album_detail(request: Request, album_id: Annotated[int, Path(ge=1, le=2**63 - 1)]):
+    return await call_deezer_catalog(request, "album", album_id)
+
+
+@app.get("/api/catalog/albums/{album_id}/tracks")
+async def album_tracks(
+    request: Request, album_id: Annotated[int, Path(ge=1, le=2**63 - 1)],
+    index: Annotated[int, Query(ge=0, le=100000)] = 0,
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+):
+    return await call_deezer_catalog(request, "album_tracks", album_id, index, limit)

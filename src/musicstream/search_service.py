@@ -60,3 +60,15 @@ async def search_tracks(
     except ProviderError as exc:
         headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
         raise HTTPException(exc.status_code, str(exc), headers=headers) from exc
+
+
+async def call_deezer_catalog(request: Request, method: str, *args):
+    provider = get_search_provider(request, "deezer")
+    try:
+        async with asyncio.timeout(12.0):
+            return await getattr(provider, method)(*args)
+    except TimeoutError as exc:
+        raise HTTPException(504, "Deezer catalog request timed out; try again later") from exc
+    except ProviderError as exc:
+        headers = {"Retry-After": exc.retry_after} if exc.retry_after else None
+        raise HTTPException(exc.status_code, str(exc), headers=headers) from exc

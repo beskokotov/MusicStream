@@ -57,7 +57,7 @@ async def audio_lifespan(app):
             await hitmos_reader.close()
 
 
-@router.get("/api/audio/hitmos-stream/{token}")
+@router.get("/api/audio/hitmos-stream/{token}", include_in_schema=False)
 async def hitmos_lab_stream(request: Request, token: str, range_header: str | None = Header(default=None, alias="Range")):
     if not getattr(request.app.state, "hitmos_lab_mode", False):
         raise HTTPException(404, "Not found")

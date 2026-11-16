@@ -496,4 +496,3 @@ class HitmosFmAdapter:
                 title or (prior.title if prior else None), duration or (prior.duration_seconds if prior else None),
                 status, reasons, f"/track/{item_id}", prior.media if prior else MediaObservation(False, None, None))
         return tuple(sorted(candidates.values(), key=lambda item: ({"likely": 0, "uncertain": 1, "mismatch": 2}[item.match], item.id)))
-

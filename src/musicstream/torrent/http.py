@@ -25,6 +25,10 @@ logger = logging.getLogger(__name__)
 class _VerifiedRangeResponse(StreamingResponse):
     """On a later piece failure, close an incomplete range for a client retry."""
 
+    def __init__(self, *args, track: _Track, **kwargs):
+        self.track = track
+        super().__init__(*args, **kwargs)
+
     async def stream_response(self, send):
         await send({"type": "http.response.start", "status": self.status_code, "headers": self.raw_headers})
         try:
@@ -36,8 +40,8 @@ class _VerifiedRangeResponse(StreamingResponse):
             # current position and the same torrent session can reconnect.
             details = None
             try:
-                if track.transfer is not None:
-                    details = track.transfer.diagnostics()
+                if self.track.transfer is not None:
+                    details = self.track.transfer.diagnostics()
             except RuntimeError:
                 pass
             logger.warning("HTTP Range interrupted reason=%s", _range_failure_reason(exc, details))
@@ -376,7 +380,8 @@ async def _stream(request: Request, playback_id: str, head: bool):
         finally:
             await registry.release(track)
 
-    return _VerifiedRangeResponse(body(), status_code=status, headers=headers, media_type=content_type)
+    return _VerifiedRangeResponse(body(), status_code=status, headers=headers, media_type=content_type,
+                                  track=track)
 
 
 @router.get("/{playback_id}")

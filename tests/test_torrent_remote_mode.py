@@ -75,6 +75,9 @@ def test_remote_timeout_cancel_and_cleanup_without_network(tmp_path, monkeypatch
         def have_piece(self, piece):
             return False
 
+        def file_progress(self):
+            return [0]
+
     class FakeSession:
         def __init__(self, options):
             self.options = options

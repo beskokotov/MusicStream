@@ -1,6 +1,6 @@
 import os
 import json
-from pathlib import Path
+from pathlib import Path as FilePath
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
 
@@ -101,7 +101,7 @@ async def lifespan(app: FastAPI):
 
                     owned_source = os.getenv("MUSICSTREAM_TORRENT_AUTO_TEST_SOURCE")
                     if owned_source:
-                        search = resolver = OwnedTorrentSource(Path(owned_source))
+                        search = resolver = OwnedTorrentSource(FilePath(owned_source))
                     else:
                         approved = frozenset(json.loads(os.getenv("MUSICSTREAM_TORRENT_APPROVED_SOURCE_IDS", "[]")))
                         prowlarr_client = httpx.AsyncClient(trust_env=False)

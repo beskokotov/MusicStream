@@ -1565,7 +1565,7 @@ const musicPlayer = (() => {
     };
     const timing = { hitmos_search_ms: null, hitmos_resolve_ms: null,
       hitmos_first_audio_response_ms: null, fallback_reason: null };
-    const fallback = reason => {
+    const fallback = (reason, discovery = null) => {
       if (current !== generation || !automaticHitmos) return;
       timing.fallback_reason = reason;
       console.info("MusicStream Auto timing", {
@@ -1575,7 +1575,8 @@ const musicPlayer = (() => {
       if (torrentAutoAvailable) prepareTorrent(reason, startedAt);
       else {
         automaticHitmos = null;
-        fail("Hitmos не подтвердил аудиопоток; резервный Auto Play Prowlarr не включён на сервере.",
+        if (discovery) presentSourceOptions(discovery);
+        else fail("Hitmos stream not confirmed; Prowlarr Auto Play is disabled on this server.",
           "stream_resolution", reason);
       }
     };
@@ -1597,14 +1598,21 @@ const musicPlayer = (() => {
       if (!search.ok) return fallback(`hitmos_search_http_${search.status}`);
       const discovered = await search.json();
       if (current !== generation) return;
+      const discoveredItems = Array.isArray(discovered.candidates) ? discovered.candidates : [];
       const candidates = discovered.selection === "automatic" && discovered.selected_source === "hitmos"
-        ? (discovered.candidates || []).filter(item => item.id === discovered.selected_id
-          && item.match?.status === "likely" && /^[0-9]{1,12}$/.test(item.id))
-        : (discovered.candidates || []).filter(item => item.source === "hitmos"
-          && item.match?.status !== "mismatch" && /^[0-9]{1,12}$/.test(item.id));
+        ? discoveredItems.filter(item => item.id === discovered.selected_id
+          && item.source === "hitmos" && item.match?.status === "likely"
+          && ["unique_high_confidence", "previously_verified"].includes(item.selection_reason)
+          && /^[0-9]{1,12}$/.test(item.id))
+        : [];
       if (!candidates.length) {
+        if (discovered.selection === "choose" && discoveredItems.length) {
+          automaticHitmos = null;
+          presentSourceOptions(discovered);
+          return;
+        }
         const hitmosStatus = (discovered.sources || []).find(item => item.source === "hitmos");
-        return fallback(hitmosStatus?.reason || discovered.reason || "hitmos_no_exact_candidate");
+        return fallback(hitmosStatus?.reason || discovered.reason || "hitmos_no_exact_candidate", discovered);
       }
 
       automaticHitmos.phase = "stream_resolution";
@@ -2014,6 +2022,40 @@ const musicPlayer = (() => {
       }
       candidates.append(card);
     }
+  }
+
+  function updateSourceControls() {
+    const isHitmos = source.value === "hitmos";
+    const isAuto = source.value === "auto";
+    hitmosSearch.hidden = !(isHitmos || isAuto);
+    hitmosForm.hidden = !(isHitmos || isAuto);
+    document.querySelector("#hitmos-advanced").hidden = !(isHitmos || isAuto);
+    document.querySelector(".youtube-consent").hidden = isHitmos;
+    document.querySelector("#youtube-manual-form").hidden = isHitmos;
+    document.querySelector("#youtube-advanced").hidden = isHitmos;
+    externalSearch.hidden = isHitmos;
+  }
+
+  function presentSourceOptions(result) {
+    const items = Array.isArray(result.candidates) ? result.candidates : [];
+    document.querySelector("#developer-mode").open = true;
+    updateSourceControls();
+    message.textContent = result.message || "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0434\u0435\u043d\u0438\u044f.";
+    reports.replaceChildren();
+    for (const report of Array.isArray(result.sources) ? result.sources : []) {
+      if (!["hitmos", "youtube"].includes(report.source)) continue;
+      const row = document.createElement("p");
+      row.textContent = `${report.source === "hitmos" ? "Hitmos" : "YouTube"}: ${report.message || "\u0421\u0442\u0430\u0442\u0443\u0441 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0430 \u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u0435\u043d."}`;
+      reports.append(row);
+    }
+    showCandidates(items, result.source);
+    diagnosticsEnabled = false;
+    diagnosticPanel.hidden = true;
+    playbackState.textContent = items.length ? "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044c" : "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d";
+    controls(false);
+    play.disabled = true;
+    resolveButton.disabled = false;
+    section.setAttribute("aria-busy", "false");
   }
 
   async function resolveSource(candidateId = null, playAfterResolve = false, candidateSource = null) {

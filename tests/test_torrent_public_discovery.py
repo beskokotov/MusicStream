@@ -136,6 +136,9 @@ def test_public_trackers_and_safe_diagnostics_without_network(tmp_path, monkeypa
             return SimpleNamespace(list_peers=7, num_peers=2, num_seeds=1,
                                    total_payload_download=self.payload)
 
+        def file_progress(self):
+            return [self.payload]
+
         def get_peer_info(self):
             return self.peers
 

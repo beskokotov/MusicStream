@@ -252,6 +252,7 @@ const musicPlayer = (() => {
   let selected, player, request, polling, apiPromise, frameTimer;
   let generation = 0;
   let ready = false;
+  let seekDragging = false;
   let torrentAutoAvailable = false;
   let torrentJobId = null;
   let torrentRequest = null;
@@ -288,6 +289,7 @@ const musicPlayer = (() => {
 
   function stop() {
     generation += 1;
+    seekDragging = false;
     if (automaticHitmos?.timer) clearTimeout(automaticHitmos.timer);
     automaticHitmos = null;
     torrentPlayStarted = null;
@@ -379,7 +381,7 @@ const musicPlayer = (() => {
     const total = ["hitmos", "torrent"].includes(activeKind) ? audio.duration : player.getDuration();
     if (Number.isFinite(total) && total > 0) {
       seek.max = String(total);
-      seek.value = String(current);
+      if (!seekDragging) seek.value = String(current);
       seek.disabled = ["hitmos", "torrent"].includes(activeKind) && (audio.seekable.length === 0
         || audio.seekable.end(audio.seekable.length - 1) <= audio.seekable.start(0));
       document.querySelector("#player-time").textContent = duration(current);
@@ -1270,7 +1272,12 @@ const musicPlayer = (() => {
     if (player.getPlayerState() === 1) player.pauseVideo();
     else { frameArea.scrollIntoView({ block: "center", behavior: "instant" }); player.playVideo(); }
   });
+  seek.addEventListener("pointerdown", () => { seekDragging = true; });
+  seek.addEventListener("input", () => { seekDragging = true; });
+  seek.addEventListener("pointercancel", () => { seekDragging = false; updateProgress(); });
+  seek.addEventListener("blur", () => { seekDragging = false; updateProgress(); });
   seek.addEventListener("change", () => {
+    seekDragging = false;
     if (!ready) return;
     if (activeKind === "hitmos" || activeKind === "torrent") {
       if (audio.seekable.length && audio.seekable.end(audio.seekable.length - 1) > audio.seekable.start(0)) {

@@ -11,7 +11,7 @@ import libtorrent as lt
 import pytest
 
 from musicstream.torrent.metadata_resolver import TorrentMetadataResolver
-from musicstream.torrent.prowlarr_discovery import parse_releases
+from musicstream.torrent.prowlarr_discovery import MusicRelease, parse_releases
 from musicstream.torrent.track_matcher import TrackReference
 
 
@@ -194,5 +194,61 @@ def test_missing_libtorrent_is_not_invalid_metadata(tmp_path, local_server, monk
             resolver = TorrentMetadataResolver(client, api_key="test-key", base_url=base,
                                                allowed_indexer_ids=(1,))
             assert (await resolver.resolve(local_release(base))).status == "dependency_missing"
+
+    asyncio.run(run())
+
+
+def test_info_hash_metadata_honors_existing_allowlist_and_requests_no_audio(
+        tmp_path, monkeypatch):
+    import musicstream.torrent.metadata_resolver as module
+
+    payload, _ = own_torrent(tmp_path, ["01 - Song.mp3"])
+    info = lt.load_torrent_buffer(payload).ti
+    info_hash = str(info.info_hashes().v1)
+    release = MusicRelease("prowlarr", "19:synthetic", "Artist - Album MP3",
+                           ("Audio/MP3",), 1000, 2, 19, "The Pirate Bay",
+                           info_hash=info_hash)
+    calls = []
+
+    class FakeHandle:
+        def has_metadata(self):
+            return True
+
+        def torrent_file(self):
+            return info
+
+    class FakeSession:
+        def __init__(self, options):
+            calls.append(options)
+
+        def add_torrent(self, params):
+            assert params.flags & lt.torrent_flags.upload_mode
+            assert params.flags & lt.torrent_flags.default_dont_download
+            assert not params.trackers and not params.url_seeds and not params.http_seeds
+            return FakeHandle()
+
+        def pause(self):
+            pass
+
+        def remove_torrent(self, handle):
+            pass
+
+    monkeypatch.setattr(lt, "session", FakeSession)
+    monkeypatch.setattr(module.tempfile, "tempdir", str(tmp_path))
+
+    async def run():
+        async with httpx.AsyncClient() as client:
+            resolver = TorrentMetadataResolver(
+                client, api_key="local-test-key", allowed_indexer_ids=(19,),
+                public_bind_ip="10.0.0.42")
+            assert (await resolver.resolve(release)).status == "unsupported_source"
+            assert calls == []
+            resolver.approved_info_hashes = frozenset({info_hash})
+            found = await resolver.resolve(release)
+            assert found.status == "ok"
+            assert found.metadata.files[0].name == "01 - Song.mp3"
+            assert str(lt.load_torrent_buffer(found.torrent_bytes).ti.info_hashes().v1) == info_hash
+            assert calls[0]["enable_dht"] is True
+            assert calls[0]["outgoing_interfaces"] == "10.0.0.42"
 
     asyncio.run(run())

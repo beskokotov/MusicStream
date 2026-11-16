@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import re
 import secrets
 import tempfile
@@ -18,14 +19,23 @@ from pydantic import BaseModel, Field
 from musicstream.providers.base import Track
 
 from .http import TorrentPlaybackRegistry
+from .cache import TTLCache
 from .metadata import inspect_torrent, select_audio_file
 from .metadata_resolver import MetadataResolution
-from .prowlarr_discovery import MusicRelease, ProwlarrDiscoveryProvider
+from .prowlarr_discovery import MusicRelease, ProwlarrDiscoveryProvider, release_fingerprint
 from .release_selection import rank_releases
 from .track_matcher import TrackReference
+from .timing import PlaybackTiming, current_timing
 
 
 router = APIRouter(prefix="/api/experimental/playback", include_in_schema=False)
+logger = logging.getLogger("uvicorn.error")
+
+
+def _log_label(value: str) -> str:
+    """Keep untrusted release names on one bounded server log line."""
+    value = re.sub(r"(?:https?://|magnet:\?)\S+", "[link]", value, flags=re.I)
+    return "".join(char if char.isprintable() else " " for char in value)[:160]
 
 
 class SearchSource(Protocol):
@@ -67,26 +77,87 @@ class OwnedTorrentSource:
 
 
 class ApprovedProwlarrSource:
-    """Search Prowlarr but resolve only explicitly approved source IDs."""
+    """Search one indexer, optionally allowing all its public music releases."""
 
-    def __init__(self, provider: ProwlarrDiscoveryProvider, approved_ids: frozenset[str]):
-        if not approved_ids:
+    def __init__(self, provider: ProwlarrDiscoveryProvider, approved_ids: frozenset[str],
+                 *, allow_unlisted: bool = False,
+                 indexer_priority: tuple[tuple[int, str], ...] = ()):
+        if not approved_ids and not allow_unlisted:
             raise ValueError("An approved release list is required")
         self.provider = provider
         self.approved_ids = approved_ids
+        self.allow_unlisted = allow_unlisted
+        self.indexer_priority = indexer_priority
+        self.last_search_total = 0
+        self._search_slots = asyncio.Semaphore(2)
+        self._search_cache: TTLCache[tuple[MusicRelease, ...]] = TTLCache(
+            ttl_seconds=90, max_entries=64, max_bytes=2 * 1024 * 1024)
+
+    async def _search_term(self, artist: str, term: str, limit: int,
+                           indexer_id: int | None) -> tuple[MusicRelease, ...]:
+        key = (artist.casefold(), term.casefold(), limit, indexer_id)
+        cached = self._search_cache.get(key)
+        if cached is not None:
+            timing = current_timing.get()
+            if timing:
+                timing.mark("search_cache_hit", indexer_id=indexer_id)
+            return cached
+        extra = {"indexer_ids": (indexer_id,)} if indexer_id is not None else {}
+        async with self._search_slots:
+            results = await self.provider.search(artist, term, limit=limit, **extra)
+        # The cache is memory-only. Releases containing credential-like URLs
+        # are not retained after this request.
+        if not any(re.search(r"(?i)passkey|api[_-]?key|auth(?:orization)?|token",
+                          release.source_id + " " + (release.metadata_url or ""))
+                   for release in results):
+            size = sum(len(release.title) + len(release.source_id) +
+                       len(release.metadata_url or "") for release in results)
+            self._search_cache.put(key, results, size=max(1, size),
+                                   ttl_seconds=5 if not results else None)
+        return results
 
     async def search(self, artist: str, album: str, *, limit: int = 20) -> tuple[MusicRelease, ...]:
-        results = await self.provider.search(artist, album, limit=limit)
-        return tuple(item for item in results if item.source_id in self.approved_ids)
+        results = await self._search_term(artist, album, limit, None)
+        self.last_search_total = len(results)
+        return self._filter(results)
+
+    def _filter(self, results: tuple[MusicRelease, ...]) -> tuple[MusicRelease, ...]:
+        return tuple(item for item in results if self.allow_unlisted or
+                     item.source_id in self.approved_ids or
+                     release_fingerprint(item) in self.approved_ids)
+
+    async def search_track(self, reference: TrackReference, *, limit: int = 50,
+                           indexer_id: int | None = None) -> tuple[MusicRelease, ...]:
+        """Search albums and singles, keeping one release per indexer identifier."""
+        queries = [reference.album, reference.title]
+        terms = tuple(dict.fromkeys(term.strip() for term in queries if term and term.strip()))
+        batches = await asyncio.gather(*(self._search_term(reference.artist, term, limit, indexer_id)
+                                         for term in terms), return_exceptions=True)
+        if all(isinstance(batch, BaseException) for batch in batches):
+            raise batches[0]
+        unique = tuple({release.source_id: release for batch in batches
+                        if isinstance(batch, tuple)
+                        for release in batch}.values())
+        self.last_search_total = len(unique)
+        return self._filter(unique)
 
 
 @dataclass
 class _Job:
     id: str
+    timing: PlaybackTiming | None = None
     status: str = "preparing"
     playback_id: str | None = None
     torrent_path: Path | None = None
+    selected_release: MusicRelease | None = None
     task: asyncio.Task | None = None
+
+
+@dataclass(frozen=True)
+class _ReadyCandidate:
+    playback_id: str
+    torrent_path: Path
+    release: MusicRelease
 
 
 class AutoTorrentPlayback:
@@ -115,9 +186,8 @@ class AutoTorrentPlayback:
         self._temporary = tempfile.TemporaryDirectory(prefix="musicstream-auto-play-")
 
     async def start(self, track: Track, request_id: str | None = None) -> dict[str, str]:
+        received_at = time.monotonic()
         reference = TrackReference.from_deezer(track)
-        if not reference.album or not reference.album.strip():
-            raise ValueError("Album metadata is required")
         async with self._lock:
             if request_id is not None and not re.fullmatch(r"[0-9a-fA-F-]{36}", request_id):
                 raise ValueError("Invalid request ID")
@@ -127,19 +197,268 @@ class AutoTorrentPlayback:
             if self._job is not None:
                 await self._cancel(self._job)
             job = _Job(request_id or secrets.token_urlsafe(18))
+            job.timing = PlaybackTiming(job.id, received_at)
             self._job = job
-            job.task = asyncio.create_task(self._prepare(job, reference))
+            context_token = current_timing.set(job.timing)
+            try:
+                job.task = asyncio.create_task(self._prepare(job, reference))
+            finally:
+                current_timing.reset(context_token)
             return {"job_id": job.id, "status": job.status}
 
     async def _prepare(self, job: _Job, reference: TrackReference) -> None:
-        had_error = False
+        job.timing.mark("prepare_started")
+        priority = (self.search.indexer_priority
+                    if isinstance(self.search, ApprovedProwlarrSource) else ())
+        if (len(priority) >= 2 and self.registry.max_streams >= 2 and
+                self.registry.manager.max_sessions >= 2):
+            await self._prepare_fast(job, reference, priority)
+            return
+        if not priority:
+            await self._prepare_one(job, reference,
+                                    time.monotonic() + self.preparation_timeout_seconds)
+            return
+        overall_deadline = time.monotonic() + self.preparation_timeout_seconds
+        any_error = False
+        for indexer in priority:
+            if job is not self._job or time.monotonic() >= overall_deadline:
+                break
+            group_deadline = min(overall_deadline, time.monotonic() + 60)
+            job.timing.mark("indexer_search_started", indexer_id=indexer[0])
+            logger.info("Auto Play job=%s indexer=%s indexer_id=%d phase=search", job.id,
+                        _log_label(indexer[1]), indexer[0])
+            await self._prepare_one(job, reference, group_deadline, indexer=indexer)
+            if job.status == "ready":
+                return
+            any_error |= job.status == "error"
+            logger.info("Auto Play job=%s indexer=%s indexer_id=%d phase=fallback status=%s",
+                        job.id, _log_label(indexer[1]), indexer[0], job.status)
+            job.status = "preparing"
+        job.status = "error" if any_error else "unavailable"
+
+    async def _prepare_fast(self, job: _Job, reference: TrackReference,
+                            priority: tuple[tuple[int, str], ...]) -> None:
+        """Race at most two indexers and retain the first verified stream."""
         deadline = time.monotonic() + self.preparation_timeout_seconds
+        selected = priority[:2]
+        tasks = {indexer[0]: asyncio.create_task(
+            self._prepare_fast_indexer(job, reference, indexer, deadline,
+                                       2 if position == 0 else self.max_candidates))
+                 for position, indexer in enumerate(selected)}
+        pending = set(tasks.values())
+        ready: dict[int, _ReadyCandidate] = {}
+        winner: _ReadyCandidate | None = None
+        errors = 0
         try:
+            while pending and time.monotonic() < deadline:
+                done, pending = await asyncio.wait(
+                    pending, timeout=max(0.01, deadline - time.monotonic()),
+                    return_when=asyncio.FIRST_COMPLETED)
+                if not done:
+                    break
+                for task in done:
+                    indexer_id = next(key for key, value in tasks.items() if value is task)
+                    try:
+                        result = task.result()
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        errors += 1
+                        logger.info("Auto Play job=%s indexer_id=%d phase=fast_prepare_error exception=%s",
+                                    job.id, indexer_id, type(exc).__name__)
+                        continue
+                    if result is not None:
+                        ready[indexer_id] = result
+                primary_id = selected[0][0]
+                if primary_id in ready:
+                    winner = ready[primary_id]
+                    break
+                if ready:
+                    if tasks[primary_id] in pending:
+                        extra, pending = await asyncio.wait(
+                            pending, timeout=min(0.75, max(0.01, deadline - time.monotonic())),
+                            return_when=asyncio.FIRST_COMPLETED)
+                        for task in extra:
+                            indexer_id = next(key for key, value in tasks.items() if value is task)
+                            try:
+                                result = task.result()
+                            except Exception:
+                                result = None
+                                errors += 1
+                            if result is not None:
+                                ready[indexer_id] = result
+                    winner = ready.get(primary_id) or next(iter(ready.values()))
+                    break
+            if winner is not None:
+                job.playback_id = winner.playback_id
+                job.torrent_path = winner.torrent_path
+                job.selected_release = winner.release
+                job.timing.mark("first_fragment_ready", indexer_id=winner.release.indexer_id)
+                logger.info("Auto Play job=%s selected_indexer=%s indexer_id=%d selected_release=%s",
+                            job.id, _log_label(winner.release.indexer), winner.release.indexer_id,
+                            _log_label(winner.release.title))
+            else:
+                job.status = "error" if errors == len(selected) else "unavailable"
+        finally:
+            for task in pending:
+                task.cancel()
+            completed = await asyncio.gather(*tasks.values(), return_exceptions=True)
+            for result in completed:
+                if isinstance(result, _ReadyCandidate) and result is not winner:
+                    await self.registry.unregister(result.playback_id)
+                    result.torrent_path.unlink(missing_ok=True)
+            if winner is not None:
+                job.status = "ready"
+
+    async def _prepare_fast_indexer(self, job: _Job, reference: TrackReference,
+                                     indexer: tuple[int, str], deadline: float,
+                                     candidate_limit: int) -> _ReadyCandidate | None:
+        logger.info("Auto Play job=%s indexer=%s indexer_id=%d phase=search", job.id,
+                    _log_label(indexer[1]), indexer[0])
+        job.timing.mark("indexer_search_started", indexer_id=indexer[0])
+        search_started = time.monotonic()
+        releases = await self.search.search_track(reference, indexer_id=indexer[0])
+        job.timing.mark("indexer_search_finished", operation_started=search_started,
+                        indexer_id=indexer[0], status=str(len(releases)))
+        logger.info("Auto Play job=%s indexer_id=%d search_results=%d", job.id,
+                    indexer[0], len(releases))
+        ordered = rank_releases(reference, releases, {}).ranked[:candidate_limit]
+        for candidate in ordered:
+            if time.monotonic() >= deadline or job is not self._job:
+                break
+            try:
+                resolution = await asyncio.wait_for(
+                    self.resolver.resolve(candidate.release),
+                    timeout=min(20, max(0.01, deadline - time.monotonic())))
+            except TimeoutError:
+                continue
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.info("Auto Play job=%s indexer_id=%d phase=metadata_failed exception=%s",
+                            job.id, indexer[0], type(exc).__name__)
+                continue
+            if resolution.status != "ok" or not resolution.metadata or not resolution.torrent_bytes:
+                logger.info("Auto Play job=%s indexer_id=%d metadata_status=%s release=%s",
+                            job.id, indexer[0], resolution.status,
+                            _log_label(candidate.release.title))
+                continue
+            selection_started = time.monotonic()
+            verified = rank_releases(
+                reference, (candidate.release,),
+                {candidate.release.source_id: resolution.metadata})
+            job.timing.mark("file_selection_finished", operation_started=selection_started,
+                            indexer_id=indexer[0], status=verified.reason)
+            if verified.release is None or verified.file_index is None:
+                continue
+            chosen = select_audio_file(resolution.metadata, verified.file_index)
+            if chosen.extension not in (".mp3", ".flac") or chosen.size == 0:
+                continue
+            job.timing.mark("audio_file_chosen", indexer_id=indexer[0], status=chosen.extension)
+            logger.info("Auto Play job=%s indexer=%s indexer_id=%d candidate=%s file=%s index=%d seeders=%s score=%.3f confidence=%.3f",
+                        job.id, _log_label(candidate.release.indexer), indexer[0],
+                        _log_label(candidate.release.title), _log_label(chosen.name), chosen.index,
+                        candidate.release.seeders, candidate.score,
+                        verified.ranked[0].track_match.confidence)
+            result = await self._try_fast_candidate(job, candidate.release, resolution,
+                                                    verified.file_index, chosen.size, deadline)
+            if result is not None:
+                return result
+        return None
+
+    async def _try_fast_candidate(self, job: _Job, release: MusicRelease,
+                                   resolved: MetadataResolution, file_index: int,
+                                   file_size: int, deadline: float) -> _ReadyCandidate | None:
+        token = secrets.token_urlsafe(18)
+        path = Path(self._temporary.name) / f"{token}.torrent"
+        registered = False
+        success = False
+        try:
+            path.write_bytes(resolved.torrent_bytes)
+            self.registry.register(token, path, file_index, peers=self.peers)
+            registered = True
+            job.status = "buffering"
+            lease = await self.registry.acquire(
+                token, wait_seconds=min(8, max(0.01, deadline - time.monotonic())))
+            try:
+                await self._adaptive_first_read(token, lease, min(self.first_bytes, file_size), deadline)
+            finally:
+                await self.registry.release(lease)
+            success = True
+            return _ReadyCandidate(token, path, release)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            self._log_transfer(job, token, "candidate_failed")
+            logger.info("Auto Play job=%s indexer_id=%d stage=fast_candidate exception=%s",
+                        job.id, release.indexer_id, type(exc).__name__)
+            return None
+        finally:
+            if not success:
+                if registered:
+                    await self.registry.unregister(token)
+                path.unlink(missing_ok=True)
+
+    async def _adaptive_first_read(self, token: str, lease, size: int,
+                                    deadline: float) -> None:
+        started = time.monotonic()
+        last_progress = started
+        payload = 0
+        read_task = asyncio.create_task(self.registry.read(
+            lease, 0, size, timeout_seconds=max(1, deadline - started)))
+        try:
+            while not read_task.done():
+                await asyncio.wait({read_task}, timeout=0.5)
+                if read_task.done():
+                    break
+                now = time.monotonic()
+                details = self.registry.diagnostics(token)
+                if details is None:
+                    continue
+                if details.downloaded_payload_bytes > payload:
+                    payload = details.downloaded_payload_bytes
+                    last_progress = now
+                elapsed = now - started
+                if now >= deadline:
+                    raise TimeoutError("Preparation deadline reached")
+                if details.discovered_peers == 0 and details.connected_peers == 0 and elapsed >= 18:
+                    raise TimeoutError("No peers discovered")
+                if details.handshakes_complete == 0 and elapsed >= 25:
+                    raise TimeoutError("No completed handshake")
+                if payload == 0 and elapsed >= 35:
+                    raise TimeoutError("No audio payload")
+                if payload > 0 and now - last_progress >= (
+                        30 if details.verified_piece_bytes else 20):
+                    raise TimeoutError("Audio payload stalled")
+            await read_task
+        finally:
+            if not read_task.done():
+                read_task.cancel()
+            await asyncio.gather(read_task, return_exceptions=True)
+
+    async def _prepare_one(self, job: _Job, reference: TrackReference, deadline: float,
+                           *, indexer: tuple[int, str] | None = None) -> None:
+        had_error = False
+        try:
+            search_started = time.monotonic()
+            search = (self.search.search_track(reference, indexer_id=indexer[0] if indexer else None)
+                      if isinstance(self.search, ApprovedProwlarrSource)
+                      else self.search.search(reference.artist, reference.album or reference.title, limit=20))
             releases = await asyncio.wait_for(
-                self.search.search(reference.artist, reference.album, limit=20),
+                search,
                 timeout=max(0.01, deadline - time.monotonic()),
             )
-            ordered = rank_releases(reference, releases, {}).ranked[:self.max_candidates]
+            job.timing.mark("indexer_search_finished", operation_started=search_started,
+                            indexer_id=indexer[0] if indexer else None,
+                            status=str(len(releases)))
+            logger.info("Auto Play job=%s search_results=%d approved_results=%d", job.id,
+                        getattr(self.search, "last_search_total", len(releases)), len(releases))
+            candidate_limit = (min(self.max_candidates, 2) if indexer and
+                               isinstance(self.search, ApprovedProwlarrSource) and
+                               self.search.indexer_priority and
+                               indexer == self.search.indexer_priority[0] and
+                               len(self.search.indexer_priority) > 1 else self.max_candidates)
+            ordered = rank_releases(reference, releases, {}).ranked[:candidate_limit]
             resolved_by_id: dict[str, MetadataResolution] = {}
             for candidate in ordered:
                 if job is not self._job:
@@ -151,7 +470,6 @@ class AutoTorrentPlayback:
                     resolved = await asyncio.wait_for(
                         self.resolver.resolve(candidate.release), timeout=min(20, remaining))
                 except TimeoutError:
-                    had_error = True
                     continue
                 except asyncio.CancelledError:
                     raise
@@ -161,12 +479,22 @@ class AutoTorrentPlayback:
                 if resolved.status == "ok" and resolved.metadata and resolved.torrent_bytes:
                     resolved_by_id[candidate.release.source_id] = resolved
                 else:
-                    had_error |= resolved.status not in ("unsupported_source",)
+                    had_error |= resolved.status not in ("unsupported_source", "unavailable")
+                    logger.info("Auto Play job=%s indexer=%s indexer_id=%d metadata_status=%s release=%s",
+                                job.id, _log_label(candidate.release.indexer),
+                                candidate.release.indexer_id, resolved.status,
+                                _log_label(candidate.release.title))
 
+            selection_started = time.monotonic()
             selection = rank_releases(
                 reference, tuple(item.release for item in ordered),
                 {key: value.metadata for key, value in resolved_by_id.items()},
             )
+            job.timing.mark("file_selection_finished", operation_started=selection_started,
+                            indexer_id=indexer[0] if indexer else None,
+                            status=selection.reason)
+            logger.info("Auto Play job=%s selection=%s candidates=%d resolved=%d", job.id,
+                        selection.reason, len(selection.ranked), len(resolved_by_id))
             if selection.reason == "ambiguous_releases":
                 job.status = "unavailable"
                 return
@@ -183,6 +511,14 @@ class AutoTorrentPlayback:
                 chosen = select_audio_file(resolved.metadata, verified.file_index)
                 if chosen.extension not in (".mp3", ".flac") or chosen.size == 0:
                     continue
+                job.timing.mark("audio_file_chosen", indexer_id=candidate.release.indexer_id,
+                                status=chosen.extension)
+                logger.info("Auto Play job=%s indexer=%s indexer_id=%d candidate=%s file=%s index=%d reported_seeders=%s score=%.3f confidence=%.3f",
+                            job.id, _log_label(candidate.release.indexer), candidate.release.indexer_id,
+                            _log_label(candidate.release.title), _log_label(chosen.name),
+                            chosen.index, candidate.release.seeders, candidate.score,
+                            verified.ranked[0].track_match.confidence)
+                stage = "write_metadata"
                 try:
                     token = secrets.token_urlsafe(18)
                     path = Path(self._temporary.name) / f"{token}.torrent"
@@ -205,36 +541,93 @@ class AutoTorrentPlayback:
                             continue
                         approved.close()
                     job.playback_id = token
+                    stage = "register"
                     self.registry.register(token, path, verified.file_index, peers=self.peers)
                     job.status = "buffering"
-                    lease = await self.registry.acquire(token)
+                    stage = "acquire"
+                    lease = await self.registry.acquire(
+                        token, wait_seconds=min(8, max(0.01, deadline - time.monotonic())))
                     try:
+                        stage = "prebuffer"
                         await asyncio.wait_for(
                             self.registry.read(lease, 0, min(self.first_bytes, chosen.size)),
                             timeout=max(0.01, deadline - time.monotonic()),
                         )
+                        self._log_transfer(job, token, "first_fragment_ready")
+                        job.timing.mark("first_fragment_ready",
+                                        indexer_id=candidate.release.indexer_id)
                     finally:
                         await self.registry.release(lease)
                     job.status = "ready"
+                    job.selected_release = candidate.release
+                    logger.info("Auto Play job=%s selected_indexer=%s indexer_id=%d selected_release=%s",
+                                job.id, _log_label(candidate.release.indexer), candidate.release.indexer_id,
+                                _log_label(candidate.release.title))
                     return
                 except TimeoutError:
+                    self._log_transfer(job, token, "timeout")
                     await self._discard_playback(job)
                 except asyncio.CancelledError:
                     raise
-                except Exception:
+                except ValueError as exc:
+                    if not ("not approved" in str(exc) or "Private torrents" in str(exc)):
+                        had_error = True
+                    logger.info("Auto Play job=%s stage=%s exception=%s", job.id, stage,
+                                type(exc).__name__)
+                    self._log_transfer(job, token, "rejected")
+                    await self._discard_playback(job)
+                except HTTPException as exc:
+                    logger.info("Auto Play job=%s stage=%s http_status=%d", job.id, stage,
+                                exc.status_code)
+                    had_error |= exc.status_code != 429
+                    self._log_transfer(job, token, "unavailable")
+                    await self._discard_playback(job)
+                except Exception as exc:
                     had_error = True
+                    logger.info("Auto Play job=%s stage=%s exception=%s", job.id, stage,
+                                type(exc).__name__)
+                    self._log_transfer(job, token, "failed")
                     await self._discard_playback(job)
             job.status = "error" if had_error else "unavailable"
         except asyncio.CancelledError:
             await self._discard_playback(job)
             raise
-        except Exception:
+        except Exception as exc:
+            logger.info("Auto Play job=%s indexer=%s phase=prepare_exception exception=%s", job.id,
+                        _log_label(indexer[1]) if indexer else "default", type(exc).__name__)
             job.status = "error"
         finally:
             if job.status != "ready":
                 await self._discard_playback(job)
 
+    def _log_transfer(self, job: _Job, playback_id: str, phase: str) -> None:
+        try:
+            details = self.registry.diagnostics(playback_id)
+        except (KeyError, RuntimeError):
+            details = None
+        if details is None:
+            logger.info("Auto Play job=%s phase=%s transfer=not_started", job.id, phase)
+            return
+        if self.registry.manager.network_mode == "safe_webseed":
+            logger.info("Auto Play job=%s phase=%s webseed_connections=%d received_bytes=%d "
+                        "verified_pieces=%d first_fragment_seconds=%s http_errors=%d",
+                        job.id, phase, details.connections, details.received_bytes,
+                        details.verified_pieces, details.first_piece_seconds, details.http_errors)
+            return
+        logger.info(
+            "Auto Play job=%s phase=%s discovered=%d connected=%d seeds=%d "
+            "handshakes=%d interested=%d unchoked=%d sent_blocks=%d received_blocks=%d "
+            "payload_bytes=%d verified_bytes=%d payload_rate=%d first_fragment_seconds=%s reason=%s",
+            job.id, phase, details.discovered_peers, details.connected_peers,
+            details.connected_seeds, details.handshakes_complete, details.interested_peers,
+            details.unchoked_piece_peers, details.sent_block_requests, details.finished_blocks,
+            details.downloaded_payload_bytes, details.verified_piece_bytes,
+            details.download_payload_rate_bytes_per_second, details.first_audio_fragment_seconds,
+            details.no_transfer_reason,
+        )
+
     async def _discard_playback(self, job: _Job) -> None:
+        job.selected_release = None
         if job.playback_id:
             await self.registry.unregister(job.playback_id)
             job.playback_id = None
@@ -283,7 +676,7 @@ class PrepareRequest(BaseModel):
     id: str | None = Field(default=None, max_length=40)
     title: str = Field(min_length=1, max_length=200)
     artist: str = Field(min_length=1, max_length=200)
-    album: str = Field(min_length=1, max_length=200)
+    album: str | None = Field(default=None, max_length=200)
     duration_seconds: float | None = Field(default=None, ge=0, le=86400)
 
 

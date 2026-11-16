@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Literal
 
 from .metadata import TorrentSettings, _from_info, _libtorrent, select_audio_file
+from .timing import current_timing
 
 
 class CacheLimitError(RuntimeError):
@@ -65,6 +66,7 @@ class TorrentSessionManager:
         peer_connect_timeout_seconds: int = 8,
         approved_public_info_hashes: frozenset[str] = frozenset(),
         public_bind_ip: str | None = None,
+        allow_unlisted_public: bool = False,
     ) -> None:
         if max_sessions < 1 or max_connections < 1:
             raise ValueError("Session and connection limits must be positive")
@@ -72,8 +74,10 @@ class TorrentSessionManager:
             raise ValueError("Invalid BitTorrent network mode")
         if not 2 <= peer_connect_timeout_seconds <= 30:
             raise ValueError("Peer connection timeout must be 2-30 seconds")
-        if network_mode == "public_discovery" and not approved_public_info_hashes:
+        if network_mode == "public_discovery" and not approved_public_info_hashes and not allow_unlisted_public:
             raise ValueError("Public discovery requires approved info hashes")
+        if allow_unlisted_public and network_mode != "public_discovery":
+            raise ValueError("Unlisted public torrents require public discovery")
         if network_mode == "public_discovery":
             try:
                 bind_address = ipaddress.IPv4Address(public_bind_ip)
@@ -93,6 +97,7 @@ class TorrentSessionManager:
         self.network_mode = network_mode
         self.peer_connect_timeout_seconds = peer_connect_timeout_seconds
         self.approved_public_info_hashes = approved_public_info_hashes
+        self.allow_unlisted_public = allow_unlisted_public
         self.public_bind_ip = public_bind_ip
         self._slots = asyncio.Semaphore(max_sessions)
         self._active: set[SelectedTorrent] = set()
@@ -191,6 +196,11 @@ class SelectedTorrent:
         self.path = path
         self.file_index = file_index
         self.peers = peers
+        self._timing = current_timing.get()
+        self._peer_seen = False
+        self._handshake_seen = False
+        self._piece_seen = False
+        self._next_milestone_sample = 0.0
         self._session = None
         self._handle = None
         self._directory: Path | None = None
@@ -216,6 +226,7 @@ class SelectedTorrent:
     async def __aenter__(self) -> SelectedTorrent:
         if self._closed:
             raise RuntimeError("Torrent session cannot be reopened")
+        session_started = time.monotonic()
         await self.manager._slots.acquire()
         try:
             if self.path.suffix.lower() != ".torrent" or not self.path.is_file():
@@ -231,7 +242,8 @@ class SelectedTorrent:
                 identifiers = {str(hashes.v1)} if hashes.has_v1() else set()
                 if hashes.has_v2():
                     identifiers.add(str(hashes.v2))
-                if not identifiers & self.manager.approved_public_info_hashes:
+                if not (self.manager.allow_unlisted_public or
+                        identifiers & self.manager.approved_public_info_hashes):
                     raise ValueError("Torrent is not approved for public discovery")
             else:
                 info = lt.torrent_info(str(self.path))
@@ -248,6 +260,7 @@ class SelectedTorrent:
             self._directory = Path(tempfile.mkdtemp(prefix="range-", dir=self.manager.settings.temp_dir))
             self._session = lt.session(self.manager.session_options())
             params.save_path = str(self._directory)
+            params.storage_mode = lt.storage_mode_t.storage_mode_sparse
             params.file_priorities = [1 if i == self.file_index else 0
                                       for i in range(self._storage.num_files())]
             params.flags |= (lt.torrent_flags.override_web_seeds |
@@ -264,6 +277,8 @@ class SelectedTorrent:
             params.url_seeds = []
             params.http_seeds = []
             self._handle = self._session.add_torrent(params)
+            if self._timing:
+                self._timing.mark("p2p_session_started", operation_started=session_started)
             self._handle.set_max_connections(self.manager.max_connections)
             self._handle.prioritize_pieces([0] * self._storage.num_pieces())
             for host, port in self.peers:
@@ -317,8 +332,40 @@ class SelectedTorrent:
         return tuple(range(absolute_start // self._piece_length,
                            (absolute_end - 1) // self._piece_length + 1))
 
+    def next_piece_boundary(self, start: int, end: int) -> int:
+        """Bound one HTTP chunk to already verifiable torrent piece data."""
+        absolute = self._storage.file_offset(self.file_index) + start
+        remaining = self._piece_length - absolute % self._piece_length
+        return min(end, start + remaining)
+
     def _disk_bytes(self) -> int:
-        return sum(p.stat().st_size for p in self._directory.rglob("*") if p.is_file())
+        if self._handle is None:
+            return 0
+        # File stat sizes include sparse zero-filled gaps before a Seek. Count
+        # the bytes libtorrent has actually written for pieces instead of the
+        # file's logical length, so a late Range does not exceed the cache cap.
+        return sum(max(0, int(value)) for value in self._handle.file_progress())
+
+    def _sample_first_milestones(self, pieces: tuple[int, ...], *, force: bool = False) -> None:
+        if not self._timing or self._handle is None:
+            return
+        now = time.monotonic()
+        if not force and now < self._next_milestone_sample:
+            return
+        self._next_milestone_sample = now + 0.1
+        status = self._handle.status()
+        if not self._peer_seen and status.list_peers > 0:
+            self._peer_seen = True
+            self._timing.mark("first_peer_discovered")
+        if not self._handshake_seen and self.manager.network_mode == "public_discovery":
+            lt = _libtorrent()
+            if any(not peer.flags & (lt.peer_info.handshake | lt.peer_info.connecting)
+                   for peer in self._handle.get_peer_info()):
+                self._handshake_seen = True
+                self._timing.mark("first_handshake")
+        if not self._piece_seen and any(self._handle.have_piece(piece) for piece in pieces):
+            self._piece_seen = True
+            self._timing.mark("first_verified_piece")
 
     def diagnostics(self) -> TorrentDiagnostics:
         """Read only counters suitable for local diagnostics, never peer details."""
@@ -428,24 +475,65 @@ class SelectedTorrent:
             if self._closed:
                 raise RuntimeError("Torrent session is closed")
             if self._first_range_started is None:
-                self._first_range_started = time.perf_counter()
-            if len(set(pieces) | self._reserved) * self._piece_length > self._budget:
+                self._first_range_started = time.monotonic()
+            # Keep the reservation/prioritization window local to the current
+            # read. Historical pieces remain hash-checked on disk, but must not
+            # consume the in-flight reservation budget for the rest of a track.
+            if len(set(pieces)) * self._piece_length > self._budget:
                 raise CacheLimitError("Requested pieces exceed disk cache limit")
             self._requested_pieces = pieces
-            self._reserved.update(pieces)
+            upcoming_pieces: set[int] = set()
             try:
+                file_last = ((self._storage.file_offset(self.file_index) + self.file.size - 1)
+                             // self._piece_length)
+                if self.manager.network_mode == "public_discovery":
+                    window_capacity = max(1, self._budget // self._piece_length)
+                    prefetch_capacity = max(0, window_capacity - len(pieces))
+                    upcoming_pieces = set(range(
+                        pieces[-1] + 1,
+                        min(pieces[-1] + 1 + min(2, prefetch_capacity), file_last + 1),
+                    ))
+                priority_window = set(pieces) | upcoming_pieces
+                for obsolete in self._reserved - priority_window:
+                    self._handle.piece_priority(obsolete, 0)
+                self._reserved = priority_window
                 for piece in pieces:
                     self._handle.piece_priority(piece, 7)
+                # Request the next two pieces while the first verified piece
+                # is still arriving. The browser otherwise waits for a fresh
+                # peer round trip at every HTTP chunk boundary.
+                if self.manager.network_mode == "public_discovery":
+                    for upcoming in sorted(upcoming_pieces):
+                        self._handle.piece_priority(upcoming, 6)
                 if self.manager.network_mode == "loopback":
                     for host, port in self.peers:
                         self._handle.connect_peer((host, port))
-                async with asyncio.timeout(timeout_seconds):
-                    while not all(self._handle.have_piece(piece) for piece in pieces):
-                        if self._closed:
-                            raise RuntimeError("Torrent session was closed")
-                        if self._disk_bytes() > self._budget:
-                            raise CacheLimitError("Disk cache limit exceeded")
-                        await asyncio.sleep(0.02)
+                last_progress = time.monotonic()
+                next_peer_retry = last_progress + 1.0
+                adaptive = self.manager.network_mode == "public_discovery"
+                last_payload = self._handle.status().total_payload_download if adaptive else 0
+                while not all(self._handle.have_piece(piece) for piece in pieces):
+                    self._sample_first_milestones(pieces)
+                    if self._closed:
+                        raise RuntimeError("Torrent session was closed")
+                    if self._disk_bytes() > self._budget:
+                        raise CacheLimitError("Disk cache limit exceeded")
+                    now = time.monotonic()
+                    if self.peers and now >= next_peer_retry:
+                        # A previously selected explicit peer may be restarting.
+                        # Retry within the live Range wait instead of requiring a
+                        # new torrent session after the peer returns.
+                        for host, port in self.peers:
+                            self._handle.connect_peer((host, port))
+                        next_peer_retry = now + 1.0
+                    payload = self._handle.status().total_payload_download if adaptive else 0
+                    if payload > last_payload:
+                        last_payload = payload
+                        last_progress = now
+                    elif now - last_progress >= timeout_seconds:
+                        raise TimeoutError("Torrent payload stalled")
+                    await asyncio.sleep(0.02)
+                self._sample_first_milestones(pieces, force=True)
                 if self._disk_bytes() > self._budget:
                     raise CacheLimitError("Disk cache limit exceeded")
                 target = (self._directory / self.file.path).resolve()
@@ -458,9 +546,10 @@ class SelectedTorrent:
                     raise IOError("Verified piece data is not yet available on disk")
                 self._verified_pieces.update(pieces)
                 if self._first_audio_fragment_seconds is None:
-                    self._first_audio_fragment_seconds = time.perf_counter() - self._first_range_started
+                    self._first_audio_fragment_seconds = time.monotonic() - self._first_range_started
                 return data
             finally:
                 if self._handle is not None:
                     for piece in pieces:
-                        self._handle.piece_priority(piece, 0)
+                        if piece not in upcoming_pieces:
+                            self._handle.piece_priority(piece, 0)

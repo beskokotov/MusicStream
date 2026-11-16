@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from musicstream.audio_providers.base import RecordingReference
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_song
-from musicstream.audio_providers.hitmos_browser import allowed_document, robots_allow_song
+from musicstream.audio_providers.hitmos_browser import allowed_document
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
 from musicstream.public_api import app as public_app
@@ -69,7 +69,7 @@ def test_browser_not_configured_keeps_external_link():
     assert result.status == "external_player"
 
 
-@pytest.mark.parametrize("error", ["robots_disallowed", "browser_unavailable", "request_budget_exhausted", "automated_access_denied"])
+@pytest.mark.parametrize("error", ["browser_unavailable", "request_budget_exhausted", "automated_access_denied", "source_http_error"])
 def test_source_errors(error):
     result = asyncio.run(HitmosProvider(Reader(error=error)).lookup(REF, SONG_ID))
     assert result.status == "error"
@@ -93,7 +93,7 @@ def test_size_limit():
     assert result.reason == "response_too_large"
 
 
-@pytest.mark.parametrize("url", ["https://ru.hitmox.org/robots.txt", f"https://ru.hitmox.org/song/{SONG_ID}"])
+@pytest.mark.parametrize("url", [f"https://ru.hitmox.org/song/{SONG_ID}"])
 def test_browser_document_allowlist(url):
     assert allowed_document(url, SONG_ID)
 
@@ -105,18 +105,6 @@ def test_browser_document_allowlist(url):
     "https://ru.hitmox.org/song/81423717?ref=1"])
 def test_forbidden_browser_destinations(url):
     assert not allowed_document(url, SONG_ID)
-
-
-@pytest.mark.parametrize("rules", ["User-agent: *\nDisallow: /song/", "User-agent: *\nDisallow: /song/*",
-    "<html>challenge</html>"])
-def test_robots_denies_changed_or_missing_policy(rules):
-    assert not robots_allow_song(rules, f"https://ru.hitmox.org/song/{SONG_ID}")
-
-
-def test_current_robots_allows_song_but_browser_never_loads_search():
-    rules = "User-agent: *\nDisallow: *q=*\nDisallow: /get/\nDisallow: /cover/"
-    assert robots_allow_song(rules, f"https://ru.hitmox.org/song/{SONG_ID}")
-    assert not allowed_document("https://ru.hitmox.org/search?q=Artist", SONG_ID)
 
 
 @pytest.fixture(params=[local_app, public_app])

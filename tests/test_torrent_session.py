@@ -116,6 +116,56 @@ def test_no_peer_timeout_and_cancel(local_swarm, tmp_path):
     asyncio.run(run())
 
 
+def test_full_real_mp3_stream_remains_hash_verified_if_available(tmp_path):
+    """Read one complete owned MP3 through one session in sequential ranges."""
+    import runpy
+
+    album = __import__("pathlib").Path(__file__).resolve().parents[1] / "test_media" / "TorrentTestAlbum"
+    if not album.is_dir():
+        pytest.skip("Optional local MP3 album is not present")
+    prepare = runpy.run_path(str(album.parents[1] / "scripts" / "local_torrent_seeder.py"))["prepare"]
+    torrent_path, files = prepare(album)
+    source = files[1]
+    manager = TorrentSessionManager(settings=TorrentSettings(tmp_path / "cache", 32 * 1024 * 1024))
+    seeder = lt.session({
+        "listen_interfaces": "127.0.0.1:0", "enable_dht": False,
+        "enable_upnp": False, "enable_natpmp": False, "enable_lsd": False,
+        "connections_limit": 2,
+    })
+    params = lt.add_torrent_params()
+    params.ti = lt.torrent_info(str(torrent_path))
+    params.save_path = str(album.parent)
+    params.flags |= lt.torrent_flags.seed_mode | lt.torrent_flags.override_trackers
+    params.trackers = []
+    handle = seeder.add_torrent(params)
+    deadline = time.monotonic() + 5
+    while seeder.listen_port() == 0 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert seeder.listen_port() > 0
+
+    async def run():
+        actual = bytearray()
+        chunk_size = 256 * 1024
+        async with manager.open_torrent(torrent_path, 1,
+                                        peers=(("127.0.0.1", seeder.listen_port()),)) as transfer:
+            for start in range(0, source.stat().st_size, chunk_size):
+                end = min(source.stat().st_size, start + chunk_size)
+                actual.extend(await transfer.read_range(start, end, timeout_seconds=30))
+            assert actual == source.read_bytes()
+            assert len(actual) == source.stat().st_size
+            assert transfer.diagnostics().verified_piece_bytes > 0
+        assert manager.active_sessions == 0
+        assert list((tmp_path / "cache").iterdir()) == []
+
+    started = time.monotonic()
+    try:
+        asyncio.run(run())
+        print(f"full_real_mp3_bytes={source.stat().st_size} elapsed_seconds={time.monotonic() - started:.3f}")
+    finally:
+        seeder.pause()
+        seeder.remove_torrent(handle)
+
+
 def test_cache_and_peer_limits(local_swarm, tmp_path):
     torrent_path, _, _ = local_swarm
     manager = TorrentSessionManager(settings=TorrentSettings(tmp_path / "cache", 16 * 1024), max_sessions=1)
@@ -127,6 +177,24 @@ def test_cache_and_peer_limits(local_swarm, tmp_path):
         with pytest.raises(ValueError, match="loopback"):
             async with manager.open_torrent(torrent_path, 1, peers=(("8.8.8.8", 6881),)):
                 pass
+
+    asyncio.run(run())
+
+
+def test_late_seek_is_bounded_by_written_pieces_not_sparse_file_length(local_swarm, tmp_path):
+    torrent_path, selected, port = local_swarm
+    manager = TorrentSessionManager(
+        settings=TorrentSettings(tmp_path / "cache", 64 * 1024), max_sessions=2,
+    )
+
+    async def run():
+        async with manager.open_torrent(torrent_path, 1,
+                                        peers=(("127.0.0.1", port),)) as transfer:
+            start, end = 35000, 35512
+            data = await transfer.read_range(start, end, timeout_seconds=5)
+            assert data == selected[start:end]
+            assert transfer._disk_bytes() <= transfer._budget
+        assert manager.active_sessions == 0
 
     asyncio.run(run())
 

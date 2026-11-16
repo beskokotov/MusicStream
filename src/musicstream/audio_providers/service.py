@@ -1,6 +1,7 @@
 """Discover, rank and remember metadata independently of HTTP routes and players."""
 
 import asyncio
+import logging
 import re
 import time
 from collections import OrderedDict
@@ -9,6 +10,8 @@ from urllib.parse import urlencode, urlsplit
 from musicstream.audio_providers.base import DiscoveryBatch, ProviderSummary, RecordingReference, SourceResult
 from musicstream.audio_providers.hitmos import CDN_HOSTS, valid_stream_url
 from musicstream.audio_providers.selection import exact_metadata, rank_batch
+
+logger = logging.getLogger(__name__)
 
 
 def reference_key(recording: RecordingReference) -> tuple:
@@ -118,8 +121,11 @@ class SourceSelectionService:
             return False
         candidate = next((c for c in result.candidates if exact_metadata(recording, c)
                           and (c.method == "youtube_iframe" or (c.method == "html_audio" and c.stream_url))), None)
-        if candidate is None or (result.source == "hitmos" and (not valid_stream_url(candidate.stream_url, candidate.id)
-                                   or urlsplit(candidate.stream_url).hostname not in CDN_HOSTS)):
+        local_lab_stream = bool(candidate and candidate.stream_url and re.fullmatch(
+            r"/api/audio/hitmos-stream/[A-Za-z0-9_-]{32,64}", candidate.stream_url))
+        if candidate is None or (result.source == "hitmos" and not local_lab_stream and (
+                not valid_stream_url(candidate.stream_url, candidate.id)
+                or urlsplit(candidate.stream_url).hostname not in CDN_HOSTS)):
             return False
         safe = candidate.model_copy(deep=True, update={"source": result.source, "stream_url": None,
                     "method": "external_link" if result.source == "hitmos" else "youtube_iframe",
@@ -148,7 +154,8 @@ class SourceSelectionService:
             if (not isinstance(result, SourceResult) or result.source != source
                     or (result.status == "available" and not any(c.id == candidate_id for c in result.candidates))):
                 raise ValueError("Invalid preparation contract")
-        except Exception:
+        except Exception as exc:
+            logger.warning("Audio source preparation failed (%s)", type(exc).__name__)
             result = SourceResult(source=source, status="error", reason="provider_error", stage="stream_resolution",
                 message="Не удалось подготовить источник. Можно открыть оригинальный сервис.", search_url=search_url(source, recording))
         if result.status != "available" or not self.remember(recording, result):

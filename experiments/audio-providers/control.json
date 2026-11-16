@@ -1,0 +1,11 @@
+{
+  "status": "STREAM_OK",
+  "http_status": 206,
+  "mime": "audio/mpeg",
+  "first_bytes_ms": 1457,
+  "bytes_read": 4096,
+  "range_supported": true,
+  "audio_signature": true,
+  "tail_verified": true,
+  "note": "official stream, audio header and tail ranges of full-sized resource"
+}

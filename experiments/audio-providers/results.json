@@ -1,0 +1,210 @@
+[
+  {
+    "deezer_id": "14381641",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "1728067467",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 2,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "14381638",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 1,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "448260732",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 1,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "458840332",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 1,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "1520555562",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "2738179801",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "67238735",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 5,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "138545995",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 23,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "3128096",
+    "audius": {
+      "status": "WRONG_VERSION",
+      "results": 4,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "138539157",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "3777794982",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  },
+  {
+    "deezer_id": "2198925847",
+    "audius": {
+      "status": "NOT_FOUND",
+      "results": 0,
+      "note": "no exact artist/title/duration/version match"
+    },
+    "jamendo": {
+      "status": "AUTH_REQUIRED",
+      "note": "published test application is suspended; registered client_id unavailable"
+    },
+    "soundcloud": {
+      "status": "AUTH_REQUIRED",
+      "note": "registered app and OAuth token unavailable"
+    }
+  }
+]

@@ -1,0 +1,71 @@
+[
+  {
+    "title": "Sonne",
+    "artist": "Rammstein",
+    "song_id": "57658982",
+    "status": "available",
+    "reason": "public_stream_found",
+    "stage": "stream_resolution",
+    "method": "html_audio",
+    "has_stream": true,
+    "match": "likely",
+    "diagnostics": {
+      "elapsed_ms": 1782,
+      "robots_status": 200,
+      "metadata_status": 200,
+      "player_format": "cuts",
+      "player_relative": false,
+      "player_valid": true,
+      "redirect_status": 302,
+      "redirect_host": "s4.deliciouspeaches.com",
+      "redirect_format": "cuts",
+      "redirect_valid": true
+    }
+  },
+  {
+    "title": "Ты не бойся ночи",
+    "artist": "ENZRO",
+    "song_id": "81423717",
+    "status": "available",
+    "reason": "public_stream_found",
+    "stage": "stream_resolution",
+    "method": "html_audio",
+    "has_stream": true,
+    "match": "likely",
+    "diagnostics": {
+      "elapsed_ms": 2250,
+      "robots_status": 200,
+      "metadata_status": 200,
+      "player_format": "cuts",
+      "player_relative": false,
+      "player_valid": true,
+      "redirect_status": 302,
+      "redirect_host": "cdn13.deliciousoranges.com",
+      "redirect_format": "cuts",
+      "redirect_valid": true
+    }
+  },
+  {
+    "title": "Ты не бойся ночи",
+    "artist": "ENZRO",
+    "song_id": "82566825",
+    "status": "external_player",
+    "reason": "stream_redirect_not_allowed",
+    "stage": "stream_resolution",
+    "method": "external_link",
+    "has_stream": false,
+    "match": "likely",
+    "diagnostics": {
+      "elapsed_ms": 1625,
+      "robots_status": 200,
+      "metadata_status": 200,
+      "player_format": "cuts",
+      "player_relative": false,
+      "player_valid": true,
+      "redirect_status": 302,
+      "redirect_host": "unapproved",
+      "redirect_format": "cuts",
+      "redirect_valid": false
+    }
+  }
+]

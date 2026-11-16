@@ -70,15 +70,15 @@ def test_discovery_contract_contains_no_match_or_media_address():
     asyncio.run(run())
 
 
-def test_blocked_hitmos_can_fall_back_to_official_youtube_adapter():
+def test_empty_hitmos_results_can_fall_back_to_official_youtube_adapter():
     async def run():
-        hitmos = Provider("hitmos", status="blocked", reason="robots_disallowed")
+        hitmos = Provider("hitmos", status="ok", reason="no_results")
         youtube = Provider("youtube", [item("youtube")])
         result = await SourceSelectionService({"hitmos": hitmos, "youtube": youtube}).discover(REF, allow_youtube=True)
         assert result.source == "auto" and result.selected_source == "youtube"
         assert result.selected_id == "abcdefghijk"
         assert result.candidates[0].source == "youtube"
-        assert result.sources[0].reason == "robots_disallowed"
+        assert result.sources[0].reason == "no_results"
     asyncio.run(run())
 
 
@@ -287,7 +287,7 @@ def test_unified_route_and_reuse_preserve_manual_api(app, monkeypatch):
 def test_auto_discovery_diagnostics_stay_local(app, enabled, monkeypatch):
     class DeniedReader:
         async def read_search(self, query):
-            raise SourceFailure("robots_disallowed", diagnostics=ResolutionDiagnostics(robots_status=200))
+            raise SourceFailure("source_http_error", diagnostics=ResolutionDiagnostics(metadata_status=403))
 
     monkeypatch.setenv("MUSICSTREAM_DIAGNOSTICS", "true")
     monkeypatch.delenv("HITMOS_BROWSER_ENABLED", raising=False)

@@ -158,6 +158,40 @@ def test_provider_distinguishes_empty_from_errors(mode, expected):
     asyncio.run(run())
 
 
+def test_priority_resolves_current_prowlarr_ids_and_filters_each_search():
+    queries = []
+
+    def handler(request):
+        assert request.headers["X-Api-Key"] == "local-test-key"
+        if request.url.path.endswith("/indexer"):
+            return httpx.Response(200, json=[
+                {"id": 19, "name": "The Pirate Bay", "enable": True, "protocol": "torrent"},
+                {"id": 7, "name": "NoNaMe Club", "enable": True, "protocol": "torrent"},
+            ])
+        queries.append(request.url.params.get_list("indexerIds"))
+        return httpx.Response(200, json=[
+            {"title": "Artist - Album MP3", "guid": "one", "protocol": "torrent",
+             "indexerId": 19, "indexer": "The Pirate Bay", "size": 1000,
+             "categories": [{"id": 3010, "name": "Audio/MP3"}]},
+            {"title": "Artist - Album MP3", "guid": "two", "protocol": "torrent",
+             "indexerId": 7, "indexer": "NoNaMe Club", "size": 1000,
+             "categories": [{"id": 3010, "name": "Audio/MP3"}]},
+        ])
+
+    async def run():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            provider = ProwlarrDiscoveryProvider(client, api_key="local-test-key")
+            priority = await provider.resolve_indexer_priority(("The Pirate Bay", "NoNaMe Club"))
+            assert priority == ((19, "The Pirate Bay"), (7, "NoNaMe Club"))
+            first = await provider.search("Artist", "Album", indexer_ids=(priority[0][0],))
+            second = await provider.search("Artist", "Album", indexer_ids=(priority[1][0],))
+            assert [item.indexer_id for item in first] == [19]
+            assert [item.indexer_id for item in second] == [7]
+            assert queries == [["19"], ["7"]]
+
+    asyncio.run(run())
+
+
 def test_deezer_to_prowlarr_to_synthetic_torrent_file():
     deezer = TrackReference.from_deezer(Track(
         source="deezer", artist="Кино", title="Группа крови", album="Группа крови",
@@ -187,3 +221,32 @@ def test_deezer_to_prowlarr_to_synthetic_torrent_file():
             assert selected.file_index == 1
 
     asyncio.run(run())
+
+
+def test_verified_single_can_match_when_deezer_album_differs():
+    reference = TrackReference("Other Artist", "Blue Song", "Blue Album")
+    single = release("Other Artist - Blue Song FLAC", "single", 3)
+    files = metadata("Other Artist/Blue Song.flac")
+    selected = rank_releases(reference, (single,), {single.source_id: files})
+    assert selected.release == single
+    assert selected.file_index == 0
+
+
+def test_verified_single_can_match_without_deezer_album():
+    reference = TrackReference("Other Artist", "Blue Song")
+    single = release("Other Artist - Blue Song MP3", "single", 1)
+    files = metadata("Other Artist/Blue Song.mp3")
+    selected = rank_releases(reference, (single,), {single.source_id: files})
+    assert selected.release == single
+    assert selected.file_index == 0
+
+
+def test_indexer_priority_cannot_promote_wrong_edition():
+    reference = TrackReference("Artist", "Song", "Album")
+    deluxe = release("Artist - Album Deluxe MP3", "primary", 100)
+    standard = release("Artist - Album MP3", "backup", 1)
+    file_list = metadata("Artist/Album/01 - Song.mp3")
+    assert rank_releases(reference, (deluxe,), {"primary": file_list}).release is None
+    selected = rank_releases(reference, (deluxe, standard),
+                             {"primary": file_list, "backup": file_list})
+    assert selected.release == standard

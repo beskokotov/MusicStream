@@ -55,10 +55,13 @@
       <div class="section-heading"><h2 id="results-heading">Результаты поиска</h2><span id="result-count" class="result-count">Начните с любимого исполнителя</span></div>
       <p id="search-status" class="sr-only" role="status" aria-live="polite" aria-atomic="true"></p>
       <div id="results-region" aria-busy="false">
+        <div id="artist-search-results" class="artist-search-results" hidden><h3>Исполнители</h3><div id="artist-search-list" class="artist-search-list"></div></div>
         <div id="empty-state" class="empty-state"><div id="state-icon" class="state-icon"><svg class="icon" aria-hidden="true"><use href="#i-wave"/></svg><span class="spinner" aria-hidden="true"></span></div><h3 id="state-title">Что звучит у вас в голове?</h3><p id="state-description">Введите название трека или имя исполнителя.<br>Ваша следующая находка — всего в одном поиске.</p><button id="retry-button" type="button" class="retry-button" hidden>Попробовать снова</button></div>
-        <div id="track-table" hidden><div class="table-head" aria-hidden="true"><span>#</span><span>Композиция</span><span>Альбом</span><svg class="icon"><use href="#i-clock"/></svg></div><ol id="track-list" class="track-list" aria-label="Найденные композиции"></ol><p class="results-note">Выберите композицию: MusicStream попробует подобрать источник. При неоднозначном совпадении выберите запись; затем нажмите Play.</p></div>
+        <div id="track-table" hidden><ol id="track-list" class="track-list" aria-label="Music search results"></ol></div>
       </div>
     </section>
+    <section id="catalog-view" class="catalog-view" hidden aria-live="polite"></section>
+    <details id="developer-mode" class="developer-mode"><summary>&#x0414;&#x0438;&#x0430;&#x0433;&#x043D;&#x043E;&#x0441;&#x0442;&#x0438;&#x043A;&#x0430;&#x0020;&#x0438;&#x0020;&#x0440;&#x0443;&#x0447;&#x043D;&#x0430;&#x044F;&#x0020;&#x043D;&#x0430;&#x0441;&#x0442;&#x0440;&#x043E;&#x0439;&#x043A;&#x0430;&#x0020;&#x0438;&#x0441;&#x0442;&#x043E;&#x0447;&#x043D;&#x0438;&#x043A;&#x043E;&#x0432;</summary>
     <section id="playback-section" class="playback-section" aria-labelledby="playback-heading" hidden>
       <div class="section-heading"><h2 id="playback-heading">Источник воспроизведения</h2><span>YouTube / Hitmos</span></div>
       <p id="source-status" role="status" aria-live="polite">Выберите источник.</p>
@@ -73,6 +76,7 @@
       <audio id="hitmos-audio" controls preload="none" hidden aria-label="Аудиоплеер Hitmos"></audio>
       <div id="youtube-frame-area" class="youtube-frame-area" hidden></div>
     </section>
+    </details>
     <details id="youtube-policy" class="youtube-policy"><summary>YouTube: условия и конфиденциальность</summary><p>MusicStream использует YouTube API Services. Для поиска выбранные название и исполнитель передаются через наш backend Google. При загрузке плеера браузер подключается к YouTube, который получает IP-адрес и может использовать cookies и показывать рекламу. Вход в аккаунт и просмотр регулирует YouTube. MusicStream не скачивает видео или аудио, не создаёт библиотеку и не сохраняет результаты YouTube; параметры запросов могут попадать в журнал backend. Снимите согласие, чтобы остановить и удалить плеер.</p><p><a href="https://www.youtube.com/t/terms" target="_blank" rel="noopener noreferrer">Условия YouTube</a> · <a href="https://policies.google.com/privacy" target="_blank" rel="noopener noreferrer">Политика конфиденциальности Google</a></p></details>
     <footer class="page-footer"><span>Музыка объединяет.</span><span>Метаданные и обложки · Deezer</span></footer>
     <noscript><p class="noscript">Для поиска включите JavaScript в браузере.</p></noscript>
@@ -80,10 +84,10 @@
 
   <footer class="player" aria-label="Музыкальный плеер">
     <div class="player-track"><div id="player-cover" class="cover player-cover"><svg class="icon" aria-hidden="true"><use href="#i-note"/></svg></div><div class="player-track-text"><div id="player-title" class="player-title">Здесь будет ваша музыка</div><div id="player-artist" class="player-artist">Выберите композицию из поиска</div></div></div>
-    <div class="player-center"><div class="player-controls"><button type="button" disabled aria-label="Предыдущая композиция — недоступно"><svg class="icon previous"><use href="#i-next"/></svg></button><button id="player-play" type="button" class="play-button" disabled aria-label="Воспроизвести видео YouTube"><svg class="icon"><use href="#i-play"/></svg></button><button type="button" disabled aria-label="Следующая композиция — недоступно"><svg class="icon"><use href="#i-next"/></svg></button></div><div class="progress"><span id="player-time">—:—</span><input id="player-seek" class="progress-track" type="range" min="0" max="1" value="0" step="1" disabled aria-label="Позиция воспроизведения"><span id="player-duration">—:—</span></div></div>
+    <div class="player-center"><div class="player-controls"><button type="button" disabled aria-label="Предыдущая композиция — недоступно"><svg class="icon previous"><use href="#i-next"/></svg></button><button id="player-play" type="button" class="play-button" disabled aria-label="Воспроизвести видео YouTube"><svg class="icon"><use href="#i-play"/></svg></button><button type="button" disabled aria-label="Следующая композиция — недоступно"><svg class="icon"><use href="#i-next"/></svg></button></div><div class="progress"><span id="player-time">—:—</span><div class="progress-track-wrap"><div class="progress-visual" aria-hidden="true"><div id="player-buffered" class="progress-buffered"></div><span id="player-heard" class="progress-heard"></span></div><input id="player-seek" class="progress-track" type="range" min="0" max="1" value="0" step="1" disabled aria-label="Позиция воспроизведения"></div><span id="player-duration">—:—</span></div></div>
     <div class="player-volume"><label for="player-volume">Громкость</label><input id="player-volume" type="range" min="0" max="100" value="60" disabled><span id="playback-state">Выберите источник</span></div>
   </footer>
 
-  <template id="track-template"><li class="track-row"><span class="track-number"></span><div class="track-main"><div class="cover track-cover"><svg class="icon" aria-hidden="true"><use href="#i-note"/></svg></div><div class="track-info"><button class="track-title" type="button"></button><span class="track-artist"></span></div></div><span class="track-album"></span><span class="track-duration"></span></li></template>
+  <template id="track-template"><li class="track-row"><button class="track-tile" type="button" aria-pressed="false"><span class="track-number"></span><span class="track-main"><span class="cover track-cover"><svg class="icon" aria-hidden="true"><use href="#i-note"/></svg></span><span class="track-info"><span class="track-title"></span><span class="track-artist"></span><span class="track-album"></span></span></span><span class="track-meta"><span class="track-duration"></span><span class="track-playback-indicator" aria-hidden="true"></span></span></button></li></template>
 </body>
 </html>

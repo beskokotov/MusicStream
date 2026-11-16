@@ -15,9 +15,9 @@ from test_hitmos_discovery import REF, Reader
 async def main():
     provider = HitmosProvider(Reader())
     automatic = (await provider.find(REF)).model_dump()
-    ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", 272),
-                                             "2": ("Sonne", "Rammstein", 272)})).find(REF)).model_dump()
-    blocked = (await HitmosProvider(Reader(error="robots_disallowed")).find(REF)).model_dump()
+    ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", None),
+                                             "2": ("Sonne", "Rammstein", None)})).find(REF)).model_dump()
+    unavailable = (await HitmosProvider(Reader(error="source_http_error")).find(REF)).model_dump()
     scenario = [automatic]
     requests = []
     async with async_playwright() as runtime:
@@ -60,30 +60,32 @@ async def main():
             await page.locator("#search-input").fill("Sonne")
             await page.locator("#search-input").press("Enter")
             await page.locator(".track-title").click()
-            await page.wait_for_function("document.querySelector('#player-play').disabled === false")
-            assert len(requests) == 1 and "hitmos_id=" not in requests[0]
+            # Selecting a tile now starts strict Hitmos Auto Play immediately.
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
             assert await page.locator("#audio-source").input_value() == "auto"
-            assert await page.locator("#hitmos-advanced summary").inner_text() == "Дополнительно / Диагностика"
             assert not await page.locator("#hitmos-advanced").evaluate("e => e.open")
             assert not await page.locator("#hitmos-url").is_visible()
-            assert await page.locator("#hitmos-audio").evaluate("e => !e.getAttribute('src')")
-            await page.locator("#player-play").click()
-            await page.wait_for_function("document.querySelector('#hitmos-audio').hasAttribute('src')")
-            assert "hitmos_id=1" in requests[-1]
-            # This deliberately blocked fixture must never claim real playback.
+            assert len(requests) == 2
+            assert "provider=auto" in requests[0] and "allow_youtube=false" in requests[0]
+            assert "hitmos_id=1" in requests[1] and "provider=hitmos" in requests[1]
+            # The stubbed CDN request is blocked; the UI must not report playback.
             await page.wait_for_timeout(150)
-            assert "Играет" not in await page.locator("#playback-state").inner_text()
+            assert not await page.locator(".track-row").evaluate("e => e.classList.contains('is-playing')")
 
             scenario[0] = ambiguous
             await page.locator(".track-title").click()
             await page.wait_for_function("document.querySelectorAll('#source-candidates .source-candidate').length === 2")
+            assert len(requests) == 3  # Ambiguous matches are shown without resolving either stream.
             assert await page.locator("#player-play").is_disabled()
             assert await page.locator("#source-candidates button").count() == 2
-            assert "Выберите запись" in await page.locator("#playback-state").inner_text()
+            assert not await page.locator(".track-row").evaluate("e => e.classList.contains('is-playing')")
+            await page.locator("#source-candidates button").first.click()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
+            assert "hitmos_id=1" in requests[-1]
 
-            scenario[0] = blocked
+            scenario[0] = unavailable
             await page.locator(".track-title").click()
-            await page.wait_for_function("document.querySelector('#source-status').textContent.includes('robots.txt')")
+            await page.wait_for_function("document.querySelector('#source-status').textContent.length > 0")
             assert await page.locator("#player-play").is_disabled()
             await page.locator("#hitmos-advanced summary").click()
             assert await page.locator("#hitmos-url").is_visible()
@@ -98,7 +100,7 @@ async def main():
                 await page.set_viewport_size({"width": width, "height": 900})
                 assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
             assert not errors, errors
-            print("BROWSER PASS: automatic discovery on selection, fresh resolve on Play, ambiguous selection, robots fallback, advanced manual input, source switching, responsive layout, no fake playback")
+            print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:
             await browser.close()
 
@@ -114,7 +116,7 @@ def test_multi_source_interface_without_network():
         from test_source_service import REF, Provider, item
 
         service = SourceSelectionService({
-            "hitmos": Provider("hitmos", status="blocked", reason="robots_disallowed"),
+            "hitmos": Provider("hitmos", status="ok", reason="no_results"),
             "youtube": Provider("youtube", [item("youtube")]),
         })
         calls = []
@@ -138,7 +140,8 @@ def test_multi_source_interface_without_network():
                         if "candidate_id" in params:
                             result = await service.prepare(REF, params["provider"][0], params["candidate_id"][0])
                         else:
-                            result = await service.discover(REF, allow_youtube=params.get("allow_youtube") == ["true"])
+                            provider = params.get("provider", ["auto"])[0]
+                            result = await service.discover(REF, allow_youtube=(provider == "youtube" or params.get("allow_youtube") == ["true"]))
                         return await route.fulfill(json=result.model_dump())
                     if url == "https://www.youtube.com/iframe_api":
                         # The mock emits readiness only; it must not claim real playback.
@@ -181,20 +184,23 @@ def test_multi_source_interface_without_network():
                 assert await page.locator("#player-play").is_disabled()
                 assert not await page.locator("#youtube-url").is_visible()
 
+                await page.locator("#hitmos-advanced summary").click()
+                await page.locator("#audio-source").select_option("youtube")
+                assert await page.locator(".youtube-consent").is_visible()
                 await page.locator("#youtube-consent").check()
-                await page.wait_for_function("!document.querySelector('#player-play').disabled")
-                assert calls[-1]["allow_youtube"] == ["true"]
-                assert await page.locator("#source-candidates .source-candidate").count() == 1
-                assert await page.evaluate("!window.YT")  # Metadata prefetch does not load the player.
-                await page.locator("#player-play").click()
+                await page.wait_for_function("document.querySelectorAll('#source-candidates .source-candidate').length === 1")
+                assert calls[-1]["provider"] == ["youtube"]
+                assert service.providers["youtube"].calls == 1
+                assert await page.evaluate("!window.YT")  # Discovery does not load the player.
+                await page.locator("#source-candidates button").click()
                 await page.wait_for_function("window.testYT && window.testYT.plays === 1")
                 assert calls[-1]["candidate_id"] == ["abcdefghijk"]
                 assert calls[-1]["provider"] == ["youtube"]
                 assert await page.locator("#youtube-frame-area").is_visible()
-                assert "Играет" not in await page.locator("#playback-state").inner_text()
+                assert not await page.locator(".track-row").evaluate("e => e.classList.contains('is-playing')")
 
                 await page.locator("#youtube-consent").uncheck()
-                await page.wait_for_function("document.querySelectorAll('#source-reports p').length === 2")
+                assert await page.locator("#source-reports p").count() == 0
                 assert await page.evaluate("window.testYT.destroyed === 1")
                 assert not await page.locator("#youtube-frame-area").is_visible()
                 assert await page.locator("#player-play").is_disabled()

@@ -178,7 +178,14 @@ def test_resolve_route_validation(api, params):
 def test_resolve_rate_limit_and_cors(api):
     for _ in range(10):
         assert api.get("/api/audio/resolve?title=Sonne&artist=Rammstein").status_code == 200
-    response = api.get("/api/audio/resolve?title=Sonne&artist=Rammstein", headers={"Origin": "https://beskokotov.github.io"})
+    # Identical successful lookups are served from the in-memory result cache
+    # and do not spend the per-client budget again.
+    assert api.get("/api/audio/resolve?title=Sonne&artist=Rammstein").status_code == 200
+    response = None
+    for index in range(9):
+        assert api.get(f"/api/audio/resolve?title=Sonne{index}&artist=Rammstein").status_code == 200
+    response = api.get("/api/audio/resolve?title=Sonne10&artist=Rammstein",
+                       headers={"Origin": "https://beskokotov.github.io"})
     assert response.status_code == 429
     assert int(response.headers["retry-after"]) > 0
     if api.app is public_app:

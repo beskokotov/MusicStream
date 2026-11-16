@@ -107,6 +107,7 @@ def test_http_range_seek_reuse_and_idle_cleanup(local_swarm, tmp_path):
         assert first.headers["content-type"] == "audio/mpeg"
         transfer = registry._tracks["demo"].transfer
         assert transfer is not None and manager.active_sessions == 1
+        assert client.post(f"{url}/keepalive").status_code == 204
 
         middle = client.get(url, headers={"Range": "bytes=20000-22999"})
         assert middle.status_code == 206 and middle.content == selected[20000:23000]
@@ -130,6 +131,78 @@ def test_http_range_seek_reuse_and_idle_cleanup(local_swarm, tmp_path):
             time.sleep(0.05)
         assert manager.active_sessions == 0
         assert list((tmp_path / "cache").iterdir()) == []
+
+
+def test_playback_keepalive_prevents_idle_session_reap(local_swarm, tmp_path):
+    import asyncio
+
+    torrent_path, _, port = local_swarm
+    manager = TorrentSessionManager(settings=TorrentSettings(tmp_path / "cache", 128 * 1024))
+    registry = TorrentPlaybackRegistry(manager, idle_seconds=0.1)
+    registry.register("demo", torrent_path, 1, peers=(("127.0.0.1", port),))
+
+    async def run():
+        track = await registry.acquire("demo")
+        await registry.read(track, 0, 1000)
+        await registry.release(track)
+        transfer = track.transfer
+        await asyncio.sleep(0.06)
+        await registry.keepalive("demo")
+        await asyncio.sleep(0.06)
+        await registry.reap_idle()
+        assert track.transfer is transfer
+        assert manager.active_sessions == 1
+        await asyncio.sleep(0.11)
+        await registry.reap_idle()
+        assert track.transfer is None
+        assert manager.active_sessions == 0
+        await registry.aclose()
+
+    asyncio.run(run())
+
+
+def test_timed_out_range_can_retry_on_same_playback_session(local_swarm, tmp_path):
+    torrent_path, selected, port = local_swarm
+    manager = TorrentSessionManager(settings=TorrentSettings(tmp_path / "cache", 128 * 1024))
+    registry = TorrentPlaybackRegistry(manager, block_size=1024)
+    registry.register("retry", torrent_path, 1, peers=(("127.0.0.1", port),))
+    original_read = registry.read
+    reads = 0
+
+    async def one_transient_timeout(track, start, end, *, timeout_seconds=None):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            raise TimeoutError("temporary missing piece")
+        return await original_read(track, start, end, timeout_seconds=timeout_seconds)
+
+    registry.read = one_transient_timeout
+
+    @asynccontextmanager
+    async def lifespan(app):
+        app.state.torrent_registry = registry
+        try:
+            yield
+        finally:
+            await registry.aclose()
+
+    app = FastAPI(lifespan=lifespan)
+    app.include_router(router)
+    with TestClient(app, client=("127.0.0.1", 12345)) as client:
+        url = "/api/experimental/torrent/retry"
+        failed = client.get(url, headers={"Range": "bytes=0-999"})
+        assert failed.status_code == 504
+        existing = registry._tracks["retry"].transfer
+        assert existing is not None and manager.active_sessions == 1
+        recovered = client.get(url, headers={"Range": "bytes=0-999"})
+        assert recovered.status_code == 206
+        assert recovered.content == selected[:1000]
+        assert registry._tracks["retry"].transfer is existing
+        assert manager.active_sessions == 1
+        closed = client.delete(url)
+        assert closed.status_code == 204
+        assert "retry" not in registry._tracks
+        assert manager.active_sessions == 0
 
 
 def test_http_rejects_nonlocal_client(local_swarm, tmp_path):

@@ -1,0 +1,622 @@
+[
+  {
+    "pass": "cold",
+    "stage": "search",
+    "title": "Sonne",
+    "elapsed_ms": 1676.1,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "57658982",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79306580",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63122010",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79410936",
+        "title": "Sonne",
+        "artist": "Rammstein, Clawfinger",
+        "duration_seconds": null
+      },
+      {
+        "id": "80274130",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "search",
+    "title": "Du hast",
+    "elapsed_ms": 1015.8,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "63121920",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63121993",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261770",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261866",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79409410",
+        "title": "Du hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "search",
+    "title": "Mutter",
+    "elapsed_ms": 967.4,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "57658985",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79422238",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63122001",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261765",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79811606",
+        "title": "Mutter (Rammstein) (Acoustic Version)",
+        "artist": "Williams Joshua",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "search",
+    "title": "Blinding Lights",
+    "elapsed_ms": 941.8,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "67509023",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      },
+      {
+        "id": "68894169",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd, Chromatics, Johnny Jewel",
+        "duration_seconds": null
+      },
+      {
+        "id": "69215345",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd, Major Lazer",
+        "duration_seconds": null
+      },
+      {
+        "id": "70922059",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      },
+      {
+        "id": "75940801",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "search",
+    "title": "Группа крови",
+    "elapsed_ms": 1086.0,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "79436285",
+        "title": "Группа крови",
+        "artist": "КИНО",
+        "duration_seconds": null
+      },
+      {
+        "id": "55527245",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "79453684",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "79403109",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "48614878",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Sonne",
+    "elapsed_ms": 4600.9,
+    "reader_ms": 4210.1,
+    "range_probe_ms": 370.8,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Sonne",
+      "artist": "Rammstein",
+      "duration_seconds": 272.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Du hast",
+    "elapsed_ms": 1377.8,
+    "reader_ms": 1017.4,
+    "range_probe_ms": 341.8,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Du Hast",
+      "artist": "Rammstein",
+      "duration_seconds": 234.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Mutter",
+    "elapsed_ms": 1744.3,
+    "reader_ms": 1354.5,
+    "range_probe_ms": 370.1,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Mutter",
+      "artist": "Rammstein",
+      "duration_seconds": 269.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Blinding Lights",
+    "elapsed_ms": 1550.1,
+    "reader_ms": 1081.3,
+    "range_probe_ms": 448.8,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Blinding Lights",
+      "artist": "The Weeknd",
+      "duration_seconds": 202.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "cold",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Группа крови",
+    "elapsed_ms": 1362.5,
+    "reader_ms": 998.5,
+    "range_probe_ms": 347.0,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Группа крови",
+      "artist": "Кино",
+      "duration_seconds": 284.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "search",
+    "title": "Sonne",
+    "elapsed_ms": 1200.8,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "57658982",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79306580",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63122010",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79410936",
+        "title": "Sonne",
+        "artist": "Rammstein, Clawfinger",
+        "duration_seconds": null
+      },
+      {
+        "id": "80274130",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "search",
+    "title": "Du hast",
+    "elapsed_ms": 937.1,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "63121920",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63121993",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261770",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261866",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79409410",
+        "title": "Du hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "search",
+    "title": "Mutter",
+    "elapsed_ms": 923.0,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "57658985",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79422238",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63122001",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261765",
+        "title": "Mutter",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79811606",
+        "title": "Mutter (Rammstein) (Acoustic Version)",
+        "artist": "Williams Joshua",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "search",
+    "title": "Blinding Lights",
+    "elapsed_ms": 1091.0,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "67509023",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      },
+      {
+        "id": "68894169",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd, Chromatics, Johnny Jewel",
+        "duration_seconds": null
+      },
+      {
+        "id": "69215345",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd, Major Lazer",
+        "duration_seconds": null
+      },
+      {
+        "id": "70922059",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      },
+      {
+        "id": "75940801",
+        "title": "Blinding Lights",
+        "artist": "The Weeknd",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "search",
+    "title": "Группа крови",
+    "elapsed_ms": 1067.0,
+    "requests": 1,
+    "candidates": [
+      {
+        "id": "79436285",
+        "title": "Группа крови",
+        "artist": "КИНО",
+        "duration_seconds": null
+      },
+      {
+        "id": "55527245",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "79453684",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "79403109",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      },
+      {
+        "id": "48614878",
+        "title": "Группа крови",
+        "artist": "Кино",
+        "duration_seconds": null
+      }
+    ],
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Sonne",
+    "elapsed_ms": 2498.0,
+    "reader_ms": 2106.8,
+    "range_probe_ms": 374.2,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Sonne",
+      "artist": "Rammstein",
+      "duration_seconds": 272.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Du hast",
+    "elapsed_ms": 1823.8,
+    "reader_ms": 1093.2,
+    "range_probe_ms": 708.4,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Du Hast",
+      "artist": "Rammstein",
+      "duration_seconds": 234.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Mutter",
+    "elapsed_ms": 2529.5,
+    "reader_ms": 2094.8,
+    "range_probe_ms": 417.4,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Mutter",
+      "artist": "Rammstein",
+      "duration_seconds": 269.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Blinding Lights",
+    "elapsed_ms": 1509.9,
+    "reader_ms": 1073.6,
+    "range_probe_ms": 419.6,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Blinding Lights",
+      "artist": "The Weeknd",
+      "duration_seconds": 202.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  },
+  {
+    "pass": "repeat",
+    "stage": "metadata_and_audio_redirect",
+    "title": "Группа крови",
+    "elapsed_ms": 1351.8,
+    "reader_ms": 1000.8,
+    "range_probe_ms": 336.9,
+    "requests": 3,
+    "song_metadata": {
+      "title": "Группа крови",
+      "artist": "Кино",
+      "duration_seconds": 284.0
+    },
+    "metadata_status": 200,
+    "redirect_status": 302,
+    "redirect_valid": true,
+    "range": {
+      "status": 206,
+      "content_type": "audio"
+    },
+    "error": null
+  }
+]

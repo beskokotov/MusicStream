@@ -13,8 +13,10 @@ def normalize(value: str) -> str:
     return " ".join(re.sub(r"[^\w]+", " ", value, flags=re.UNICODE).split())
 
 
-VERSIONS = ("live", "remix", "cover", "instrumental", "karaoke", "acoustic",
-            "sped up", "slowed", "remaster", "remastered", "radio edit", "extended",
+VERSIONS = ("live", "concert", "remix", "remixed", "cover", "tribute", "parody",
+            "instrumental", "karaoke", "acoustic", "unplugged", "sped up", "slowed",
+            "remaster", "remastered", "radio edit", "extended", "demo", "bootleg",
+            "orchestral", "re recorded", "rerecorded", "re recording", "mashup",
             "clean", "explicit", "ремикс", "лайв", "кавер")
 
 

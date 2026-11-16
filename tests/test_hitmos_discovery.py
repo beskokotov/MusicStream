@@ -11,6 +11,7 @@ from musicstream.audio_providers.base import RecordingReference, SourceDocument
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
 from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, can_use_lab_stream_url_directly, document_kind, redirect_target, request_action
 from musicstream.audio_providers.matching import assess
+from musicstream.audio_providers.service import SourceSelectionService
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
 from musicstream.public_api import app as public_app
@@ -110,12 +111,13 @@ def test_search_embedded_track_metadata_is_used_without_page_navigation():
 
 def test_duplicate_exact_matches_are_retained_for_playback_fallback():
     result = find(Reader({"1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272)}))
-    assert result.selection == "choose" and result.selected_id is None
+    assert result.selection == "automatic" and result.selected_id == "1"
     assert [candidate.id for candidate in result.candidates] == ["1", "2"]
     assert all(candidate.match.status == "likely" for candidate in result.candidates)
 
 
-@pytest.mark.parametrize("version", ["Live", "Remix", "Radio Edit", "Explicit", "Clean"])
+@pytest.mark.parametrize("version", ["Live", "Concert", "Remix", "Cover", "Acoustic",
+                                    "Radio Edit", "Explicit", "Clean", "Demo", "Instrumental"])
 def test_version_is_not_hidden_by_equal_duration(version):
     result = find(Reader({"1": ("Sonne " + version, "Rammstein", 272)}))
     candidate = result.candidates[0]
@@ -143,13 +145,189 @@ def test_explicit_true_needs_source_confirmation_and_false_is_not_clean():
     assert assess(explicit, "Sonne (Clean)", "Rammstein", 272).status == "mismatch"
 
 
-def test_partial_failure_or_truncated_search_disables_auto_choice():
+def test_first_confirmed_candidate_is_auto_selected_without_refining_lower_ranked_rows():
     reader = Reader({"1": ("Sonne Live", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272), "3": None})
     result = find(reader)
-    assert result.selection == "choose" and result.selected_id is None
+    assert result.selection == "automatic" and result.selected_id == "2"
     exact = next(candidate for candidate in result.candidates if candidate.id == "2")
     assert exact.match.status == "likely"
-    assert len(reader.calls) == 1  # search metadata is enough for discovery
+    assert reader.calls == [("search", "Rammstein Sonne")]
+
+
+def test_missing_search_durations_are_enriched_and_only_exact_recording_is_auto_selected():
+    class LinkOnlyReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            html = []
+            for song_id, song in self.songs.items():
+                html.append(f'<a href="/song/{song_id}">track</a>')
+                if song is not None:
+                    title, artist, _ = song
+                    metadata = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                                "name": title, "byArtist": [{"name": artist}], "duration": "unknown"}
+                    html.append('<script type="application/ld+json">'+json.dumps(metadata)+'</script>')
+            return SourceDocument("".join(html))
+
+    async def run():
+        reader = LinkOnlyReader({
+            "1": ("Sonne", "Rammstein", 272),
+            "2": ("Sonne Live", "Rammstein", 272),
+            "3": ("Sonne Remix", "Rammstein", 272),
+            "4": ("Sonne", "Rammstein, Clawfinger", 272),
+        })
+        provider = HitmosProvider(reader, diagnostics_enabled=True)
+        result = await SourceSelectionService({"hitmos": provider}).discover(REF)
+        assert result.selection == "automatic" and result.selected_id == "1"
+        assert {candidate.id: candidate.duration_seconds for candidate in result.candidates} == {
+            "1": 272, "2": None, "3": None, "4": None,
+        }
+        assert next(c for c in result.candidates if c.id == "1").match.status == "likely"
+        assert next(c for c in result.candidates if c.id == "2").match.status == "mismatch"
+        assert next(c for c in result.candidates if c.id == "3").match.status == "mismatch"
+        assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
+
+    asyncio.run(run())
+
+
+def test_metadata_refinement_stops_after_first_confirmed_duplicate():
+    class LinkOnlyReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            metadata = ''.join(
+                f'<a href="/song/{song_id}">track</a><script type="application/ld+json">'
+                + json.dumps({"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                              "name": song[0], "byArtist": [{"name": song[1]}], "duration": "unknown"})
+                + '</script>' for song_id, song in self.songs.items())
+            return SourceDocument(metadata)
+
+    async def run():
+        reader = LinkOnlyReader({"1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272)})
+        result = await HitmosProvider(reader).find(REF)
+        assert result.selection == "automatic" and result.selected_id == "1"
+        assert next(c for c in result.candidates if c.id == "1").match.status == "likely"
+        assert next(c for c in result.candidates if c.id == "2").match.status == "uncertain"
+        assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
+
+    asyncio.run(run())
+
+
+def test_unresolved_lower_ranked_candidate_does_not_block_confirmed_winner():
+    class LinkOnlyReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            html = []
+            for song_id, song in self.songs.items():
+                html.append(f'<a href="/song/{song_id}">track</a>')
+                if song is not None:
+                    title, artist, _ = song
+                    metadata = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                                "name": title, "byArtist": [{"name": artist}], "duration": "unknown"}
+                    html.append('<script type="application/ld+json">'+json.dumps(metadata)+'</script>')
+            return SourceDocument("".join(html))
+
+    async def run():
+        reader = LinkOnlyReader({
+            "1": ("Sonne", "Rammstein", 272),
+            "2": ("Sonne Live", "Rammstein", 272),
+            "3": ("Sonne Remix", "Rammstein", 272),
+            "4": None,
+        })
+        result = await SourceSelectionService({"hitmos": HitmosProvider(reader)}).discover(REF)
+        assert result.selection == "automatic" and result.selected_id == "1"
+        assert next(c for c in result.candidates if c.id == "1").match.status == "likely"
+        unresolved = next(c for c in result.candidates if c.id == "4")
+        assert unresolved.duration_seconds is None and unresolved.match.status == "uncertain"
+
+    asyncio.run(run())
+
+
+def test_metadata_refinement_stops_after_one_successful_candidate():
+    class LinkOnlyReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            html = []
+            for song_id, song in self.songs.items():
+                html.append(f'<a href="/song/{song_id}">track</a>')
+                if song is not None:
+                    title, artist, _ = song
+                    metadata = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                                "name": title, "byArtist": [{"name": artist}], "duration": "unknown"}
+                    html.append('<script type="application/ld+json">'+json.dumps(metadata)+'</script>')
+            return SourceDocument("".join(html))
+
+    async def run():
+        reader = LinkOnlyReader({
+            "1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272),
+            "3": ("Sonne", "Rammstein", 272), "4": ("Sonne", "Rammstein", 272),
+            "5": ("Sonne", "Rammstein", 272),
+        })
+        result = await HitmosProvider(reader).find(REF)
+        assert len([call for call in reader.calls if call[0] != "search"]) == 1
+        assert result.selection == "automatic" and result.selected_id == "1"
+        assert next(c for c in result.candidates if c.id == "5").duration_seconds is None
+
+    asyncio.run(run())
+
+
+def test_fast_match_checks_next_ranked_candidates_after_version_rejection_without_id_sorting():
+    class OrderedReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            html = []
+            for song_id, _ in self.songs.items():
+                html.append(f'<a href="/song/{song_id}">Sonne</a>')
+                metadata = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                            "name": "Sonne", "byArtist": [{"name": "Rammstein"}], "duration": "unknown"}
+                html.append('<script type="application/ld+json">'+json.dumps(metadata)+'</script>')
+            return SourceDocument("".join(html))
+
+        async def read_song(self, song_id, *, metadata_only=False):
+            self.calls.append((song_id, metadata_only))
+            title, artist, seconds = self.songs[song_id]
+            metadata = {"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                        "name": title, "byArtist": [{"name": artist}], "duration": f"PT{seconds}S"}
+            stream = f"https://cdn13.deliciousoranges.com/s1/get/music/20251120/track_{song_id}.mp3"
+            return SourceDocument('<script type="application/ld+json">'+json.dumps(metadata)+'</script>',
+                                  None if metadata_only else stream)
+
+    async def run():
+        reader = OrderedReader({"99": ("Sonne Live", "Rammstein", 272),
+                                "2": ("Sonne Remix", "Rammstein", 272),
+                                "7": ("Sonne", "Rammstein", 272),
+                                "1": ("Sonne", "Rammstein", 272)})
+        provider = HitmosProvider(reader, diagnostics_enabled=True)
+        batch = await provider.discover(REF)
+        assert batch.auto_candidate_id == "7"
+        assert [call[0] for call in reader.calls[1:]] == ["99", "2", "7"]
+
+    asyncio.run(run())
+
+
+def test_timeout_during_metadata_enrichment_keeps_candidate_unconfirmed(monkeypatch):
+    class SlowReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            metadata = ''.join(
+                f'<a href="/song/{song_id}">Sonne</a><script type="application/ld+json">'
+                + json.dumps({"@type": "MusicRecording", "@id": f"https://ru.hitmox.org/song/{song_id}",
+                              "name": "Sonne", "byArtist": [{"name": "Rammstein"}], "duration": "unknown"})
+                + '</script>' for song_id in self.songs)
+            return SourceDocument(metadata)
+
+        async def read_song(self, song_id, *, metadata_only=False):
+            self.calls.append((song_id, metadata_only))
+            await asyncio.sleep(.03)
+            return await super().read_song(song_id, metadata_only=metadata_only)
+
+    monkeypatch.setattr("musicstream.audio_providers.hitmos.STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS", .005)
+
+    async def run():
+        reader = SlowReader({"1": ("Sonne", "Rammstein", 272), "2": ("Sonne", "Rammstein", 272)})
+        result = await HitmosProvider(reader).find(REF)
+        assert result.selection == "choose" and result.selected_id is None
+        assert all(candidate.duration_seconds is None for candidate in result.candidates)
+
+    asyncio.run(run())
 
 
 def test_empty_result_errors_and_candidates_without_search_metadata_are_distinct():

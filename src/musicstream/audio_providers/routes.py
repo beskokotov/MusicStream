@@ -125,7 +125,9 @@ async def resolve_audio(
         raise HTTPException(429, "Source lookup limit reached", headers={"Retry-After": str(retry_after)})
     recording = RecordingReference(title=title.strip(), artist=artist.strip(), duration_seconds=duration_seconds, explicit_lyrics=explicit_lyrics)
     try:
-        operation_timeout = 30 if getattr(request.app.state, "hitmos_lab_mode", False) and (hitmos_id or candidate_id) else 10
+        operation_timeout = (30 if getattr(request.app.state, "hitmos_lab_mode", False) and (hitmos_id or candidate_id)
+                             else 15 if provider == "auto" or (provider == "hitmos" and not (hitmos_id or candidate_id))
+                             else 10)
         async with asyncio.timeout(operation_timeout):
             if hitmos_id or candidate_id:
                 result = await request.app.state.source_selection.prepare(recording, provider, hitmos_id or candidate_id)

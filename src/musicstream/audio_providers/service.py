@@ -10,6 +10,7 @@ from urllib.parse import urlencode, urlsplit
 from musicstream.audio_providers.base import DiscoveryBatch, ProviderSummary, RecordingReference, SourceResult
 from musicstream.audio_providers.hitmos import CDN_HOSTS, valid_stream_url
 from musicstream.audio_providers.selection import exact_metadata, rank_batch
+from musicstream.audio_providers.matching import normalize, versions
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +26,36 @@ def search_url(source: str, recording: RecordingReference) -> str:
             "https://www.youtube.com/results?" + urlencode({"search_query": query}))
 
 
+def _equivalent_hitmos_group(recording: RecordingReference, candidates):
+    """Return confirmed duplicate sources for one version, otherwise an empty group."""
+    if len(candidates) < 2 or recording.duration_seconds is None:
+        return []
+    wanted_title = normalize(recording.title)
+    wanted_artist = normalize(recording.artist)
+    wanted_versions = versions(f"{recording.title} {recording.artist}")
+    durations = []
+    for candidate in candidates:
+        if (candidate.source != "hitmos" or candidate.match.status != "likely"
+                or not exact_metadata(recording, candidate)
+                or normalize(candidate.title) != wanted_title
+                or normalize(candidate.artist or "") != wanted_artist
+                or versions(f"{candidate.title} {candidate.artist or ''}") != wanted_versions
+                or candidate.duration_seconds is None):
+            return []
+        durations.append(candidate.duration_seconds)
+    # A one-second catalog rounding difference is common; larger spreads may
+    # indicate a different edit, so they remain a user choice.
+    if max(durations) - min(durations) > 1:
+        return []
+    # rank_batch already preserves the source's order when quality is tied.
+    return candidates
+
+
 class SourceSelectionService:
     MAX_ENTRIES = 64
     MATCH_TTL = 600
     PROVIDER_TIMEOUT = 8
+    HITMOS_PROVIDER_TIMEOUT = 14
 
     def __init__(self, providers, *, clock=time.monotonic):
         self.providers = providers
@@ -59,7 +86,9 @@ class SourceSelectionService:
         url = search_url(source, recording)
         try:
             # Waiting for an occupied provider is included in its deadline.
-            async with asyncio.timeout(self.PROVIDER_TIMEOUT):
+            provider_timeout = (self.HITMOS_PROVIDER_TIMEOUT if source == "hitmos"
+                               else self.PROVIDER_TIMEOUT)
+            async with asyncio.timeout(provider_timeout):
                 async with self._gates[source]:
                     cached = self._get(self._batches, key)
                     if cached is not None:
@@ -91,17 +120,47 @@ class SourceSelectionService:
         if not allow_youtube:
             batches.append(DiscoveryBatch(source="youtube", status="blocked", reason="consent_required",
                 message="Для поиска и плеера YouTube требуется ваше согласие.", search_url=search_url("youtube", recording)))
+        matching_started = time.monotonic()
         results = [rank_batch(recording, batch) for batch in batches]
         candidates = [candidate for result in results for candidate in result.candidates]
-        candidates.sort(key=lambda c: ({"likely": 0, "uncertain": 1, "mismatch": 2}[c.match.status], -(c.match_score or 0)))
-        eligible = [c for c in candidates if c.match.status != "mismatch"]
+        candidates.sort(key=lambda c: ({"likely": 0, "uncertain": 1, "mismatch": 2}[c.match.status],
+                                       -(c.match_score or 0), c.source))
+        eligible = [c for c in candidates if c.match.status != "mismatch"
+                    and (c.source != "hitmos" or (
+                        normalize(c.title) == normalize(recording.title)
+                        and (not c.artist or normalize(c.artist) == normalize(recording.artist))))]
         complete = all(batch.complete for batch in batches if batch.status == "ok") and not any(batch.status == "error" for batch in batches)
-        chosen = eligible[0] if (len(eligible) == 1 and complete and exact_metadata(recording, eligible[0])
-                                and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe")) else None
+        confirmed = [candidate for candidate in eligible if candidate.match.status == "likely"]
+        equivalent_group = _equivalent_hitmos_group(recording, confirmed)
+        hitmos_batch = next((batch for batch in batches if batch.source == "hitmos"), None)
+        fast_candidate = next((candidate for candidate in confirmed
+                               if hitmos_batch and candidate.id == hitmos_batch.auto_candidate_id
+                               and candidate.source == "hitmos" and (candidate.match_score or 0) >= .90
+                               and exact_metadata(recording, candidate)
+                               and versions(f"{candidate.title} {candidate.artist or ''}")
+                               == versions(f"{recording.title} {recording.artist}")
+                               and not any(other.source != "hitmos" for other in confirmed)), None)
+        first_confirmed_hitmos = next((candidate for candidate in confirmed
+                                       if candidate.source == "hitmos" and (candidate.match_score or 0) >= .90
+                                       and exact_metadata(recording, candidate)
+                                       and versions(f"{candidate.title} {candidate.artist or ''}")
+                                       == versions(f"{recording.title} {recording.artist}")
+                                       and not any(other.source != "hitmos" for other in confirmed)), None)
+        chosen = fast_candidate or first_confirmed_hitmos
+        if chosen is None:
+            chosen = (eligible[0] if (len(eligible) == 1 and complete and exact_metadata(recording, eligible[0])
+                                      and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe"))
+                      else equivalent_group[0] if equivalent_group
+                      and not any(batch.status == "error" for batch in batches) else None)
+        equivalent_ids = {candidate.id for candidate in equivalent_group}
         for candidate in candidates:
             candidate.selection_reason = ("recording_mismatch" if candidate.match.status == "mismatch" else
                                           "unique_high_confidence" if candidate is chosen else "manual_confirmation_required")
+            if chosen and candidate.source == "hitmos" and candidate.id in equivalent_ids and candidate is not chosen:
+                candidate.selection_reason = "equivalent_recording"
         trouble = any(batch.status != "ok" for batch in batches)
+        if hitmos_batch and hitmos_batch.diagnostics:
+            hitmos_batch.diagnostics.matching_elapsed_ms = round((time.monotonic() - matching_started) * 1000)
         result = SourceResult(source="auto", status="available" if chosen else "external_player" if candidates or trouble else "unavailable",
             reason="unique_high_confidence" if chosen else "ambiguous_candidates" if candidates else "sources_unavailable" if trouble else "no_results",
             message="Источник подобран по метаданным. Нажмите Play для проверки воспроизведения." if chosen else
@@ -112,7 +171,7 @@ class SourceSelectionService:
             selection="automatic" if chosen else "choose" if candidates else "none",
             selected_id=chosen.id if chosen else None, selected_source=chosen.source if chosen else None,
             stage="matching" if candidates else "source_search",
-            diagnostics=next((batch.diagnostics for batch in batches if batch.source == "hitmos"), None),
+            diagnostics=hitmos_batch.diagnostics if hitmos_batch else None,
             sources=[ProviderSummary(**batch.model_dump(include={"source", "status", "reason", "message", "search_url"})) for batch in batches])
         return result
 

@@ -1,0 +1,298 @@
+[
+  {
+    "pass": "cold",
+    "method": "httpx",
+    "title": "Sonne",
+    "status": 403,
+    "search_ms": 476.7,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 478.3
+  },
+  {
+    "pass": "cold",
+    "method": "httpx",
+    "title": "Du hast",
+    "status": 403,
+    "search_ms": 476.9,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 1025.4
+  },
+  {
+    "pass": "cold",
+    "method": "httpx",
+    "title": "Mutter",
+    "status": 403,
+    "search_ms": 463.6,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 988.8
+  },
+  {
+    "pass": "cold",
+    "method": "httpx",
+    "title": "Blinding Lights",
+    "status": 403,
+    "search_ms": 368.5,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 910.5
+  },
+  {
+    "pass": "cold",
+    "method": "httpx",
+    "title": "Группа крови",
+    "status": 403,
+    "search_ms": 411.9,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 1062.1
+  },
+  {
+    "pass": "cold",
+    "method": "browser_reader",
+    "title": "Sonne",
+    "search_ms": 1507.9,
+    "metadata_ms": 1498.4,
+    "audio_source_ms": 1498.4,
+    "requests": "document + robots/player (not exposed)",
+    "candidates": [
+      {
+        "id": "57658982",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79306580",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63122010",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79410936",
+        "title": "Sonne",
+        "artist": "Rammstein, Clawfinger",
+        "duration_seconds": null
+      },
+      {
+        "id": "80274130",
+        "title": "Sonne",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "detail_status": 200,
+    "redirect_status": 302,
+    "redirect_validated": true,
+    "song_metadata": {
+      "title": "Sonne",
+      "artist": "Rammstein",
+      "duration_seconds": 272.0
+    },
+    "total_ms": 3153.5
+  },
+  {
+    "pass": "cold",
+    "method": "browser_reader",
+    "title": "Du hast",
+    "search_ms": 859.3,
+    "metadata_ms": 1143.8,
+    "audio_source_ms": 1143.8,
+    "requests": "document + robots/player (not exposed)",
+    "candidates": [
+      {
+        "id": "63121920",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63121993",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261770",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "63261866",
+        "title": "Du Hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      },
+      {
+        "id": "79409410",
+        "title": "Du hast",
+        "artist": "Rammstein",
+        "duration_seconds": null
+      }
+    ],
+    "detail_status": 200,
+    "redirect_status": 302,
+    "redirect_validated": true,
+    "song_metadata": {
+      "title": "Du Hast",
+      "artist": "Rammstein",
+      "duration_seconds": 234.0
+    },
+    "total_ms": 2144.5
+  },
+  {
+    "pass": "cold",
+    "method": "browser_reader",
+    "title": "Mutter",
+    "total_ms": 1186.1,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "cold",
+    "method": "browser_reader",
+    "title": "Blinding Lights",
+    "total_ms": 0.1,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "cold",
+    "method": "browser_reader",
+    "title": "Группа крови",
+    "total_ms": 0.2,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "repeat",
+    "method": "httpx",
+    "title": "Sonne",
+    "status": 403,
+    "search_ms": 586.5,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 588.1
+  },
+  {
+    "pass": "repeat",
+    "method": "httpx",
+    "title": "Du hast",
+    "status": 403,
+    "search_ms": 425.1,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 848.3
+  },
+  {
+    "pass": "repeat",
+    "method": "httpx",
+    "title": "Mutter",
+    "status": 403,
+    "search_ms": 414.0,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 1002.7
+  },
+  {
+    "pass": "repeat",
+    "method": "httpx",
+    "title": "Blinding Lights",
+    "status": 403,
+    "search_ms": 397.0,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 1003.8
+  },
+  {
+    "pass": "repeat",
+    "method": "httpx",
+    "title": "Группа крови",
+    "status": 403,
+    "search_ms": 609.7,
+    "metadata_ms": null,
+    "audio_source_ms": null,
+    "requests": 1,
+    "audio_redirect": null,
+    "range": "not_checked_audio_not_fetched",
+    "error": "http_403",
+    "total_ms": 1214.9
+  },
+  {
+    "pass": "repeat",
+    "method": "browser_reader",
+    "title": "Sonne",
+    "total_ms": 0.1,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "repeat",
+    "method": "browser_reader",
+    "title": "Du hast",
+    "total_ms": 0.0,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "repeat",
+    "method": "browser_reader",
+    "title": "Mutter",
+    "total_ms": 0.0,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "repeat",
+    "method": "browser_reader",
+    "title": "Blinding Lights",
+    "total_ms": 0.0,
+    "error": "SourceFailure"
+  },
+  {
+    "pass": "repeat",
+    "method": "browser_reader",
+    "title": "Группа крови",
+    "total_ms": 0.1,
+    "error": "SourceFailure"
+  }
+]

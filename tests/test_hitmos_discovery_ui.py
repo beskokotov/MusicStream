@@ -9,12 +9,16 @@ pytest.importorskip("playwright.async_api")
 from playwright.async_api import async_playwright
 
 from musicstream.audio_providers.hitmos import HitmosProvider
+from musicstream.audio_providers.service import SourceSelectionService
 from test_hitmos_discovery import REF, Reader
 
 
 async def main():
-    provider = HitmosProvider(Reader())
-    automatic = (await provider.find(REF)).model_dump()
+    provider = HitmosProvider(Reader({
+        "1": ("Sonne", "Rammstein", 272),
+        "2": ("Sonne", "Rammstein", 272),
+    }))
+    automatic = (await SourceSelectionService({"hitmos": provider}).discover(REF)).model_dump()
     ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", None),
                                              "2": ("Sonne", "Rammstein", None)})).find(REF)).model_dump()
     unavailable = (await HitmosProvider(Reader(error="source_http_error")).find(REF)).model_dump()
@@ -39,7 +43,10 @@ async def main():
                     requests.append(url)
                     if "hitmos_id=" in url:
                         song_id = "2" if "hitmos_id=2" in url else "1"
-                        return await route.fulfill(json=(await provider.lookup(REF, song_id)).model_dump())
+                        if song_id == "1":
+                            return await route.abort("failed")
+                        prepared = await provider.lookup(REF, song_id)
+                        return await route.fulfill(json=prepared.model_dump())
                     return await route.fulfill(json=scenario[0])
                 if not url.startswith("http://127.0.0.1:8017/"):
                     return await route.abort()
@@ -62,12 +69,14 @@ async def main():
             await page.locator(".track-title").click()
             # Selecting a tile now starts strict Hitmos Auto Play immediately.
             await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
+            assert await page.locator("#playback-section").get_attribute("aria-busy") == "false"
             assert await page.locator("#audio-source").input_value() == "auto"
             assert not await page.locator("#hitmos-advanced").evaluate("e => e.open")
             assert not await page.locator("#hitmos-url").is_visible()
-            assert len(requests) == 2
+            assert len(requests) == 3
             assert "provider=auto" in requests[0] and "allow_youtube=false" in requests[0]
             assert "hitmos_id=1" in requests[1] and "provider=hitmos" in requests[1]
+            assert "hitmos_id=2" in requests[2] and "provider=hitmos" in requests[2]
             # The stubbed CDN request is blocked; the UI must not report playback.
             await page.wait_for_timeout(150)
             assert not await page.locator(".track-row").evaluate("e => e.classList.contains('is-playing')")
@@ -75,7 +84,8 @@ async def main():
             scenario[0] = ambiguous
             await page.locator(".track-title").click()
             await page.wait_for_function("document.querySelectorAll('#source-candidates .source-candidate').length === 2")
-            assert len(requests) == 3  # Ambiguous matches are shown without resolving either stream.
+            assert await page.locator("#playback-section").get_attribute("aria-busy") == "false"
+            assert len(requests) == 4  # Ambiguous matches are shown without resolving either stream.
             assert await page.locator("#player-play").is_disabled()
             assert await page.locator("#source-candidates button").count() == 2
             assert not await page.locator(".track-row").evaluate("e => e.classList.contains('is-playing')")

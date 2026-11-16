@@ -107,6 +107,52 @@ def test_candidates_from_two_sources_do_not_collapse_into_one_recording():
     asyncio.run(run())
 
 
+def test_first_confirmed_hitmos_source_is_selected_without_numeric_id_tie_break():
+    async def run():
+        provider = Provider("hitmos", [item(id="10"), item(id="2")])
+        result = await SourceSelectionService({"hitmos": provider}).discover(REF)
+        assert result.selection == "automatic" and result.selected_source == "hitmos"
+        assert result.selected_id == "10"
+        assert [candidate.id for candidate in result.candidates] == ["10", "2"]
+        assert result.candidates[0].selection_reason == "unique_high_confidence"
+        assert result.candidates[1].selection_reason == "equivalent_recording"
+        assert provider.calls == 1  # Availability is tried lazily, without discovery probes.
+    asyncio.run(run())
+
+
+def test_equivalent_group_remains_selectable_when_lower_ranked_search_rows_are_truncated():
+    async def run():
+        provider = Provider("hitmos", [item(id="1"), item(id="2")])
+        provider.batch.complete = False
+        result = await SourceSelectionService({"hitmos": provider}).discover(REF)
+        assert result.selection == "automatic" and result.selected_id == "1"
+        assert result.candidates[1].selection_reason == "equivalent_recording"
+    asyncio.run(run())
+
+
+def test_first_confirmed_hitmos_source_can_auto_play_while_unconfirmed_rows_stay_unselected():
+    async def run():
+        provider = Provider("hitmos", [item(id="10"), item(id="2"),
+                                        item(id="99", duration_seconds=None)])
+        result = await SourceSelectionService({"hitmos": provider}).discover(REF)
+        assert result.selection == "automatic" and result.selected_id == "10"
+        uncertain = next(candidate for candidate in result.candidates if candidate.id == "99")
+        assert uncertain.match.status == "uncertain"
+        assert uncertain.selection_reason == "manual_confirmation_required"
+    asyncio.run(run())
+
+
+def test_version_labels_are_not_collapsed_with_the_base_recording():
+    async def run():
+        provider = Provider("hitmos", [item(id="1"), item(id="2", title="Sonne Live")])
+        result = await SourceSelectionService({"hitmos": provider}).discover(REF)
+        assert result.selection == "automatic" and result.selected_id == "1"
+        live = next(candidate for candidate in result.candidates if candidate.id == "2")
+        assert live.match.status == "mismatch"
+        assert live.selection_reason == "recording_mismatch"
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("changes", [{"title": "Sonne Live"}, {"title": "Sonne Remix"}, {"title": "Sonne Radio Edit"},
                                     {"title": "Sonne Clean"}, {"title": "Sonne Explicit"}, {"duration_seconds": 400}])
 def test_score_never_overrides_version_or_duration_rejection(changes):

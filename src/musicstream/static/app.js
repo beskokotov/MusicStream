@@ -1134,8 +1134,9 @@ const musicPlayer = (() => {
   const hitmosPlaybackCache = new Map(); // Deezer ID -> short lived in-memory Hitmos source
   // Previous browser measurements: Hitmos playback became active in 1.85–2.52 s
   // after a resolved stream was assigned. Keep a modest margin for CDN variance.
-  // The server allows up to 10 s for source lookup and up to 8 s inside discovery.
+  // Candidate resolution stays at 11 s; bounded Hitmos metadata discovery gets 16 s.
   const HITMOS_LOOKUP_TIMEOUT_MS = 11000;
+  const HITMOS_DISCOVERY_TIMEOUT_MS = 16000;
   const HITMOS_AUDIO_START_TIMEOUT_MS = 4000;
 
   function logTorrentMilestone(stage) {
@@ -1563,7 +1564,9 @@ const musicPlayer = (() => {
         if (request === controller) request = undefined;
       }
     };
-    const timing = { hitmos_search_ms: null, hitmos_resolve_ms: null,
+    const timing = { hitmos_search_ms: null, hitmos_metadata_refinement_ms: null,
+      hitmos_metadata_refinement_requests: null, hitmos_preselection_stream_preparation_ms: null,
+      hitmos_resolve_ms: null, hitmos_stream_preparation_ms: null,
       hitmos_first_audio_response_ms: null, fallback_reason: null };
     const fallback = (reason, discovery = null) => {
       if (current !== generation || !automaticHitmos) return;
@@ -1580,8 +1583,8 @@ const musicPlayer = (() => {
           "stream_resolution", reason);
       }
     };
-    // The auto resolver only promotes one exact, high-confidence Hitmos match and
-    // never enables YouTube. Its matching contract rejects alternate versions.
+    // Auto Play can carry a verified-equivalent Hitmos group so the browser can
+    // choose the first playable source without treating alternate versions as equal.
     const params = new URLSearchParams({ title: track.title, artist: track.artist,
       provider: "auto", allow_youtube: "false" });
     if (/^[0-9]{1,20}$/.test(String(track.id))) params.set("deezer_id", String(track.id));
@@ -1592,18 +1595,25 @@ const musicPlayer = (() => {
     section.setAttribute("aria-busy", "true");
     let searchStarted = performance.now();
     try {
-      const search = await fetchHitmos(`/api/audio/resolve?${params}`, HITMOS_LOOKUP_TIMEOUT_MS, "hitmos_search_timeout");
+      const search = await fetchHitmos(`/api/audio/resolve?${params}`, HITMOS_DISCOVERY_TIMEOUT_MS, "hitmos_search_timeout");
       timing.hitmos_search_ms = Math.round(performance.now() - searchStarted);
       if (current !== generation) return;
       if (!search.ok) return fallback(`hitmos_search_http_${search.status}`);
       const discovered = await search.json();
       if (current !== generation) return;
+      const diagnostics = discovered.diagnostics || {};
+      timing.hitmos_metadata_refinement_ms = Number.isFinite(diagnostics.metadata_enrichment_elapsed_ms)
+        ? diagnostics.metadata_enrichment_elapsed_ms : 0;
+      timing.hitmos_metadata_refinement_requests = Number.isFinite(diagnostics.metadata_enrichment_requests)
+        ? diagnostics.metadata_enrichment_requests : 0;
+      timing.hitmos_preselection_stream_preparation_ms = Number.isFinite(diagnostics.stream_preparation_elapsed_ms)
+        ? diagnostics.stream_preparation_elapsed_ms : 0;
       const discoveredItems = Array.isArray(discovered.candidates) ? discovered.candidates : [];
       const candidates = discovered.selection === "automatic" && discovered.selected_source === "hitmos"
-        ? discoveredItems.filter(item => item.id === discovered.selected_id
-          && item.source === "hitmos" && item.match?.status === "likely"
-          && ["unique_high_confidence", "previously_verified"].includes(item.selection_reason)
+        ? discoveredItems.filter(item => item.source === "hitmos" && item.match?.status === "likely"
           && /^[0-9]{1,12}$/.test(item.id))
+          .sort((left, right) => left.id === discovered.selected_id ? -1 : right.id === discovered.selected_id ? 1
+            : (right.match_score || 0) - (left.match_score || 0))
         : [];
       if (!candidates.length) {
         if (discovered.selection === "choose" && discoveredItems.length) {
@@ -1633,6 +1643,10 @@ const musicPlayer = (() => {
         if (!resolved.ok) return { reason: `hitmos_stream_http_${resolved.status}` };
         const prepared = await resolved.json();
         if (current !== generation) return { stale: true };
+        if (Number.isFinite(prepared.diagnostics?.elapsed_ms)) {
+          timing.hitmos_stream_preparation_ms = (timing.hitmos_stream_preparation_ms || 0)
+            + prepared.diagnostics.elapsed_ms;
+        }
         const playable = (prepared.candidates || []).find(item => item.id === candidate.id
           && item.match?.status === "likely" && item.method === "html_audio"
           && validHitmosStream(item.stream_url, item.id));
@@ -1642,7 +1656,15 @@ const musicPlayer = (() => {
       let nextCandidateIndex = 0;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index];
-        const resolved = await resolveCandidate(candidate);
+        let resolved;
+        try {
+          resolved = await resolveCandidate(candidate);
+        } catch (error) {
+          if (current !== generation || !automaticHitmos || error.name === "AbortError") return;
+          lastReason = error.message === "hitmos_resolve_timeout" ? error.message : "hitmos_resolve_failed";
+          candidateFailures.push({ id: candidate.id, reason: lastReason });
+          continue;
+        }
         if (resolved.stale) return;
         if (resolved.stream) {
           stream = resolved.stream;
@@ -2038,6 +2060,7 @@ const musicPlayer = (() => {
 
   function presentSourceOptions(result) {
     const items = Array.isArray(result.candidates) ? result.candidates : [];
+    setTilePlaybackState(selected?.id, "idle");
     document.querySelector("#developer-mode").open = true;
     updateSourceControls();
     message.textContent = result.message || "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0434\u0435\u043d\u0438\u044f.";
@@ -2115,8 +2138,15 @@ const musicPlayer = (() => {
       diagnosticPanel.hidden = !diagnosticsEnabled;
       if (diagnosticsEnabled) {
         const safe = {};
-        const fields = ["elapsed_ms", "metadata_status", "player_relative", "player_valid", "redirect_status", "redirect_valid"];
+        const fields = ["elapsed_ms", "search_elapsed_ms", "metadata_enrichment_elapsed_ms",
+          "metadata_enrichment_requests", "metadata_lookup_elapsed_ms", "stream_preparation_elapsed_ms",
+          "matching_elapsed_ms", "metadata_status", "player_relative", "player_valid", "redirect_status",
+          "redirect_valid"];
         for (const key of fields) if (["number", "boolean"].includes(typeof result.diagnostics[key])) safe[key] = result.diagnostics[key];
+        if (Array.isArray(result.diagnostics.metadata_enrichment_ids)
+            && result.diagnostics.metadata_enrichment_ids.every(id => /^[0-9]{1,12}$/.test(id))) {
+          safe.metadata_enrichment_ids = result.diagnostics.metadata_enrichment_ids;
+        }
         for (const key of ["player_format", "redirect_format"]) if (["cuts", "music", "missing", "unsupported"].includes(result.diagnostics[key])) safe[key] = result.diagnostics[key];
         if (/^(ru\.hitmox\.org|cdn(?:7|11|13|14|17)\.deliciousoranges\.com|s4\.deliciouspeaches\.com|unapproved)$/.test(result.diagnostics.redirect_host || "")) safe.redirect_host = result.diagnostics.redirect_host;
         document.querySelector("#source-diagnostics-data").textContent = JSON.stringify(safe, null, 2);

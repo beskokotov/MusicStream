@@ -9,6 +9,13 @@ class ResolutionDiagnostics(BaseModel):
     """Local-only, allowlisted facts. Never store URLs, headers or cookies."""
 
     elapsed_ms: int | None = None
+    search_elapsed_ms: int | None = None
+    metadata_enrichment_elapsed_ms: int | None = None
+    metadata_enrichment_requests: int | None = None
+    metadata_enrichment_ids: list[str] = Field(default_factory=list, max_length=3)
+    metadata_lookup_elapsed_ms: int | None = None
+    stream_preparation_elapsed_ms: int | None = None
+    matching_elapsed_ms: int | None = None
     metadata_status: int | None = None
     player_format: Literal["cuts", "music", "missing", "unsupported"] = "missing"
     player_relative: bool = False
@@ -98,6 +105,7 @@ class DiscoveryBatch(BaseModel):
     search_url: str
     recordings: list[DiscoveredRecording] = Field(default_factory=list)
     complete: bool = True
+    auto_candidate_id: str | None = Field(default=None, pattern=r"^[0-9]{1,12}$")
     diagnostics: ResolutionDiagnostics | None = None
 
 

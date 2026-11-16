@@ -46,9 +46,29 @@ def allowed_document(url: str, song_id: str, search_url: str | None = None) -> b
         return False
 
 
-def request_action(url, resource_type, method, frame_id, main_frame_id, song_id, player_url, started, search_url=None):
+def document_kind(url: str, song_id: str, search_url: str | None = None) -> str:
+    """Return a non-sensitive route label for local CDP diagnostics."""
+    if search_url and url == search_url:
+        return "search"
+    try:
+        path = urlsplit(url).path
+    except ValueError:
+        return "other"
+    if path == f"/song/{song_id}":
+        return "song"
+    if path == "/robots.txt":
+        return "robots"
+    return "other"
+
+
+def request_action(url, resource_type, method, frame_id, main_frame_id, song_id, player_url, started,
+                  search_url=None, network_frame_id=None):
     """Decision for every CDP request, including requests following redirects."""
-    if method != "GET" or frame_id != main_frame_id:
+    # Fetch.requestPaused.frameId can be absent in some Chromium/CDP event
+    # sequences. Only use the matching Network event as a fallback; never infer
+    # that an unknown frame is the main frame from its URL or resource type.
+    initiating_frame_id = frame_id if frame_id is not None else network_frame_id
+    if method != "GET" or initiating_frame_id != main_frame_id:
         return "block"
     if resource_type == "Document" and allowed_document(url, song_id, search_url):
         return "document"
@@ -74,6 +94,14 @@ def redirect_target(status: int, headers: list[dict], source_url: str, song_id: 
     except ValueError:
         pass
     return None
+
+
+def can_use_lab_stream_url_directly(url: str) -> bool:
+    """Only media hosts may be probed directly; Hitmos URLs must issue their redirect."""
+    try:
+        return urlsplit(url).hostname != "ru.hitmox.org" and validated_audio_url(url)
+    except ValueError:
+        return False
 
 
 def _host_resolves_publicly(host: str) -> bool:
@@ -169,10 +197,14 @@ class HitmosBrowserReader:
                     state = {"player_url": None, "started": False, "player_request_id": None, "reason": None}
                     received = [0]
                     documents = set()
+                    network_document_frames = {}
 
                     def track_request(event):
                         if event.get("type") == "Document":
                             documents.add(event["requestId"])
+                            frame_id = event.get("frameId")
+                            if isinstance(frame_id, str):
+                                network_document_frames[event["requestId"]] = frame_id
 
                     def track_failure(event):
                         if self.diagnostics_enabled and event.get("requestId") in documents:
@@ -273,11 +305,21 @@ class HitmosBrowserReader:
                                     return
                                 await cdp.send("Fetch.failRequest", {"requestId": event["requestId"], "errorReason": "Aborted"})
                                 return
+                            network_id = event.get("networkId")
+                            network_frame_id = network_document_frames.get(network_id)
+                            frame_id = event.get("frameId")
                             action = request_action(request["url"], event["resourceType"], request["method"],
-                                                    event.get("frameId"), main_frame, song_id,
-                                                    state["player_url"], state["started"], search_url)
+                                                    frame_id, main_frame, song_id,
+                                                    state["player_url"], state["started"], search_url,
+                                                    network_frame_id=network_frame_id)
                             if self.diagnostics_enabled and event["resourceType"] == "Document":
-                                logger.warning("Hitmos document request: action=%s", action)
+                                frame_relation = ("main" if frame_id == main_frame else
+                                                  "other" if frame_id is not None else "missing")
+                                network_relation = ("main" if network_frame_id == main_frame else
+                                                    "other" if network_frame_id is not None else "missing")
+                                logger.warning("Hitmos document request: kind=%s action=%s fetch_frame=%s network_frame=%s",
+                                               document_kind(request["url"], song_id, search_url), action,
+                                               frame_relation, network_relation)
                             if action in {"document", "player"}:
                                 if action == "player":
                                     state["started"] = True
@@ -286,7 +328,9 @@ class HitmosBrowserReader:
                                 await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"], "interceptResponse": True})
                             else:
                                 if self.diagnostics_enabled and event["resourceType"] == "Document":
-                                    reason = "main_frame_mismatch" if event.get("frameId") != main_frame else "document_outside_allowlist"
+                                    reason = ("main_frame_mismatch" if frame_id is not None and frame_id != main_frame
+                                              else "main_frame_unconfirmed" if frame_id is None and network_frame_id != main_frame
+                                              else "document_outside_allowlist")
                                     logger.warning("Hitmos document request rejected (%s)", reason)
                                 if event["resourceType"] == "Media" and state["started"] and not resolution.done():
                                     state["reason"] = "stream_redirect_not_allowed"
@@ -345,7 +389,7 @@ class HitmosBrowserReader:
                         if not public_host:
                             return result(html, reason="stream_host_not_public")
                         return result(html, player_url)
-                    if self.lab_mode and validated_audio_url(player_url):
+                    if self.lab_mode and can_use_lab_stream_url_directly(player_url):
                         return result(html, player_url)
                     state["player_url"] = player_url
                     # A normal metadata request gets the source-issued redirect.

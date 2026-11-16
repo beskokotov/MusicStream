@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from musicstream.audio_providers.base import RecordingReference, SourceDocument
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
-from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, request_action
+from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, can_use_lab_stream_url_directly, document_kind, redirect_target, request_action
 from musicstream.audio_providers.matching import assess
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
@@ -306,6 +306,32 @@ def test_search_request_gate_allows_only_the_exact_search_document():
     assert request_action(SEARCH, "Fetch", "GET", "main", "main", "", None, False, SEARCH) == "block"
     assert request_action(SEARCH + "x", "Document", "GET", "main", "main", "", None, False, SEARCH) == "block"
     assert request_action("https://ru.hitmox.org/unapproved", "Document", "GET", "main", "main", "", None, False) == "block"
+
+
+def test_fetch_without_frame_id_requires_matching_network_frame_confirmation():
+    song = "https://ru.hitmox.org/song/57658982"
+    assert request_action(song, "Document", "GET", None, "main", "57658982", None, False,
+                          network_frame_id="main") == "document"
+    assert request_action(song, "Document", "GET", None, "main", "57658982", None, False) == "block"
+    assert request_action(song, "Document", "GET", "subframe", "main", "57658982", None, False,
+                          network_frame_id="main") == "block"
+    assert request_action("https://evil.invalid/song/57658982", "Document", "GET", None, "main",
+                          "57658982", None, False, network_frame_id="main") == "block"
+    assert request_action(song, "Fetch", "GET", None, "main", "57658982", None, False,
+                          network_frame_id="main") == "block"
+    assert document_kind(song, "57658982") == "song"
+    assert document_kind("https://ru.hitmox.org/robots.txt", "57658982") == "robots"
+    assert document_kind("https://ru.hitmox.org/other", "57658982") == "other"
+
+
+def test_lab_resolves_hitmos_source_url_redirect_before_direct_media_probe():
+    song = "57658982"
+    source = f"https://ru.hitmox.org/get/cuts/aa/bb/{'a' * 32}/{song}/track.mp3"
+    cdn = f"https://s4.deliciouspeaches.com/get/cuts/aa/bb/{'a' * 32}/{song}/track.mp3"
+    assert not can_use_lab_stream_url_directly(source)
+    assert can_use_lab_stream_url_directly(cdn)
+    assert redirect_target(302, [{"name": "Location", "value": cdn}], source, song,
+                           lab_mode=True) == cdn
 
 
 def test_hitmos_media_hosts_must_resolve_only_to_public_addresses(monkeypatch):

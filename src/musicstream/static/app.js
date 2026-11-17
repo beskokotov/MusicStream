@@ -1113,6 +1113,57 @@ const musicPlayer = (() => {
   const diagnosticPanel = document.querySelector("#source-diagnostics");
   let diagnosticsEnabled = false;
   const stageLabels = { source_search: "поиск источника", source_metadata: "метаданные источника", matching: "сопоставление записей", stream_resolution: "получение адреса", cdn_response: "загрузка CDN", browser_playback: "воспроизведение браузером" };
+  const sourceDiagnosticFields = [
+    "elapsed_ms", "browser_launch_elapsed_ms", "browser_context_create_elapsed_ms",
+    "browser_page_create_elapsed_ms", "domcontentloaded_elapsed_ms", "document_body_elapsed_ms",
+    "search_extraction_elapsed_ms", "jsonld_extraction_elapsed_ms", "player_json_extraction_elapsed_ms",
+    "player_redirect_elapsed_ms", "browser_request_count", "browser_navigation_count",
+    "search_elapsed_ms", "metadata_enrichment_elapsed_ms", "metadata_lookup_elapsed_ms", "metadata_enrichment_requests",
+    "stream_preparation_elapsed_ms", "matching_elapsed_ms", "metadata_status",
+    "player_relative", "player_valid", "redirect_status", "redirect_valid",
+  ];
+  const sourceDiagnosticExtraFields = [
+    "overall_resolve_elapsed_ms", "hitmos_search_request_ms", "candidate_resolve_request_ms",
+    "play_to_source_ready_ms",
+  ];
+
+  function renderSourceDiagnostics(diagnostics = null, extras = {}) {
+    const safe = {};
+    if (diagnostics && typeof diagnostics === "object") {
+      for (const key of sourceDiagnosticFields) {
+        const value = diagnostics[key];
+        if (typeof value === "number" && Number.isFinite(value)) safe[key] = value;
+        else if (typeof value === "boolean") safe[key] = value;
+      }
+      const refinementRequests = diagnostics.metadata_enrichment_requests;
+      if (!(typeof refinementRequests === "number" && refinementRequests > 0)) {
+        delete safe.metadata_enrichment_elapsed_ms;
+        delete safe.metadata_lookup_elapsed_ms;
+        delete safe.stream_preparation_elapsed_ms;
+      }
+      if (Array.isArray(diagnostics.metadata_enrichment_ids)
+          && refinementRequests > 0
+          && diagnostics.metadata_enrichment_ids.every(id => /^[0-9]{1,12}$/.test(id))) {
+        safe.metadata_enrichment_ids = diagnostics.metadata_enrichment_ids;
+      }
+      for (const key of ["player_format", "redirect_format"]) {
+        if (["cuts", "music", "missing", "unsupported"].includes(diagnostics[key])) safe[key] = diagnostics[key];
+      }
+      if (/^(ru\.hitmox\.org|cdn(?:7|11|13|14|17)\.deliciousoranges\.com|s4\.deliciouspeaches\.com|unapproved)$/.test(diagnostics.redirect_host || "")) {
+        safe.redirect_host = diagnostics.redirect_host;
+      }
+    }
+    for (const key of sourceDiagnosticExtraFields) {
+      if (typeof extras[key] === "number" && Number.isFinite(extras[key])) safe[key] = extras[key];
+    }
+    for (const key of ["cache_status", "source_search_network", "candidate_resolution_network", "audio_stream_network"]) {
+      if (typeof extras[key] === "string" && extras[key]) safe[key] = extras[key];
+    }
+    const output = document.querySelector("#source-diagnostics-data");
+    diagnosticsEnabled = Object.keys(safe).length > 0;
+    diagnosticPanel.hidden = !diagnosticsEnabled;
+    output.textContent = diagnosticsEnabled ? JSON.stringify(safe, null, 2) : "";
+  }
   let activeKind = null;
   let preparedSource = null;
   let selected, player, request, polling, apiPromise, frameTimer;
@@ -1534,6 +1585,7 @@ const musicPlayer = (() => {
   async function prepareAutomaticPlayback() {
     if (!selected) return;
     stop();
+    renderSourceDiagnostics();
     const startedAt = performance.now();
     let current = generation;
     const track = selected;
@@ -1541,6 +1593,12 @@ const musicPlayer = (() => {
     automaticHitmos = { startedAt, current, track, timer: null, phase: "search" };
     const cachedPlayback = hitmosPlaybackCache.get(String(track.id));
     if (cachedPlayback && cachedPlayback.expiresAt > Date.now()) {
+      renderSourceDiagnostics(null, {
+        cache_status: "Hitmos playback URL reused from client cache",
+        source_search_network: "not performed; source URL reused from client cache",
+        candidate_resolution_network: "not performed; source URL reused from client cache",
+        audio_stream_network: "required for playback",
+      });
       automaticHitmos.phase = "audio_response";
       automaticHitmos.timing = { fallback_reason: null, reused_hitmos_source: true };
       automaticHitmos.timer = setTimeout(() => {
@@ -1594,6 +1652,9 @@ const musicPlayer = (() => {
     message.textContent = "Сначала проверяем точное совпадение и доступность аудио Hitmos.";
     section.setAttribute("aria-busy", "true");
     let searchStarted = performance.now();
+    let discoveryDiagnostics = null;
+    let discoveryReusedCache = false;
+    let candidateReusedCache = false;
     try {
       const search = await fetchHitmos(`/api/audio/resolve?${params}`, HITMOS_DISCOVERY_TIMEOUT_MS, "hitmos_search_timeout");
       timing.hitmos_search_ms = Math.round(performance.now() - searchStarted);
@@ -1601,7 +1662,9 @@ const musicPlayer = (() => {
       if (!search.ok) return fallback(`hitmos_search_http_${search.status}`);
       const discovered = await search.json();
       if (current !== generation) return;
-      const diagnostics = discovered.diagnostics || {};
+      discoveryReusedCache = discovered.reused_cache === true || discovered.reused_match === true;
+      discoveryDiagnostics = discoveryReusedCache ? null : discovered.diagnostics || null;
+      const diagnostics = discoveryDiagnostics || {};
       timing.hitmos_metadata_refinement_ms = Number.isFinite(diagnostics.metadata_enrichment_elapsed_ms)
         ? diagnostics.metadata_enrichment_elapsed_ms : 0;
       timing.hitmos_metadata_refinement_requests = Number.isFinite(diagnostics.metadata_enrichment_requests)
@@ -1627,6 +1690,8 @@ const musicPlayer = (() => {
 
       automaticHitmos.phase = "stream_resolution";
       let stream = null;
+      let selectedPreparedDiagnostics = null;
+      let selectedPreparationReusedCache = false;
       let currentCandidateId = null;
       let lastReason = "hitmos_stream_unavailable";
       const candidateFailures = [];
@@ -1643,6 +1708,7 @@ const musicPlayer = (() => {
         if (!resolved.ok) return { reason: `hitmos_stream_http_${resolved.status}` };
         const prepared = await resolved.json();
         if (current !== generation) return { stale: true };
+        candidateReusedCache = prepared.reused_cache === true;
         if (Number.isFinite(prepared.diagnostics?.elapsed_ms)) {
           timing.hitmos_stream_preparation_ms = (timing.hitmos_stream_preparation_ms || 0)
             + prepared.diagnostics.elapsed_ms;
@@ -1651,7 +1717,8 @@ const musicPlayer = (() => {
           && item.match?.status === "likely" && item.method === "html_audio"
           && validHitmosStream(item.stream_url, item.id));
         return prepared.status === "available" && playable
-          ? { stream: playable } : { reason: prepared.reason || "hitmos_stream_unavailable" };
+          ? { stream: playable, diagnostics: prepared.diagnostics || null, reusedCache: candidateReusedCache }
+          : { reason: prepared.reason || "hitmos_stream_unavailable" };
       };
       let nextCandidateIndex = 0;
       for (let index = 0; index < candidates.length; index += 1) {
@@ -1668,6 +1735,8 @@ const musicPlayer = (() => {
         if (resolved.stale) return;
         if (resolved.stream) {
           stream = resolved.stream;
+          selectedPreparedDiagnostics = resolved.diagnostics;
+          selectedPreparationReusedCache = resolved.reusedCache === true;
           currentCandidateId = stream.id;
           nextCandidateIndex = index + 1;
           break;
@@ -1681,6 +1750,28 @@ const musicPlayer = (() => {
         });
         return fallback(candidateFailures.length ? "hitmos_candidates_unavailable" : lastReason);
       }
+
+      const preparedDiagnostics = selectedPreparationReusedCache ? null : selectedPreparedDiagnostics;
+      const combinedDiagnostics = { ...(discoveryDiagnostics || {}), ...(preparedDiagnostics || {}) };
+      if (discoveryDiagnostics && preparedDiagnostics) {
+        for (const key of ["elapsed_ms", "browser_launch_elapsed_ms", "browser_context_create_elapsed_ms",
+          "browser_page_create_elapsed_ms", "domcontentloaded_elapsed_ms", "document_body_elapsed_ms",
+          "search_extraction_elapsed_ms", "jsonld_extraction_elapsed_ms", "player_json_extraction_elapsed_ms",
+          "player_redirect_elapsed_ms", "browser_request_count", "browser_navigation_count"]) {
+          const values = [discoveryDiagnostics[key], preparedDiagnostics[key]];
+          const measured = values.filter(value => typeof value === "number" && Number.isFinite(value));
+          if (measured.length) combinedDiagnostics[key] = measured.reduce((sum, value) => sum + value, 0);
+        }
+      }
+      renderSourceDiagnostics(combinedDiagnostics, {
+        hitmos_search_request_ms: timing.hitmos_search_ms,
+        candidate_resolve_request_ms: timing.hitmos_resolve_ms,
+        play_to_source_ready_ms: Math.round(performance.now() - startedAt),
+        overall_resolve_elapsed_ms: Math.round(performance.now() - startedAt),
+        source_search_network: discoveryReusedCache ? "not performed; discovery cache hit" : "performed",
+        candidate_resolution_network: selectedPreparationReusedCache ? "not performed; preparation cache hit" : "performed",
+        audio_stream_network: "required for playback",
+      });
 
       hitmosPlaybackCache.set(String(track.id), {
         item: { ...stream, title: track.title, artist: track.artist },
@@ -2072,8 +2163,14 @@ const musicPlayer = (() => {
       reports.append(row);
     }
     showCandidates(items, result.source);
-    diagnosticsEnabled = false;
-    diagnosticPanel.hidden = true;
+    renderSourceDiagnostics(result.diagnostics, {
+      source_search_network: candidateId ? "not performed; direct candidate resolution"
+        : result.reused_cache ? "not performed; discovery cache hit" : "performed",
+      candidate_resolution_network: candidateId
+        ? result.reused_cache ? "not performed; response cache hit" : "performed"
+        : "not performed; deferred until Play",
+      audio_stream_network: "not started; browser playback has not been initiated",
+    });
     playbackState.textContent = items.length ? "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044c" : "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d";
     controls(false);
     play.disabled = true;
@@ -2091,8 +2188,7 @@ const musicPlayer = (() => {
     }
     stop();
     const current = generation;
-    diagnosticsEnabled = false;
-    diagnosticPanel.hidden = true;
+    renderSourceDiagnostics();
     candidates.replaceChildren();
     reports.replaceChildren();
     if (!selected.title || !selected.artist || selected.title.length > 200 || selected.artist.length > 200) {
@@ -2110,6 +2206,7 @@ const musicPlayer = (() => {
     if (provider === "auto") params.set("allow_youtube", String(consent.checked));
     if (typeof selected.duration_seconds === "number") params.set("duration_seconds", String(selected.duration_seconds));
     if (typeof selected.explicit_lyrics === "boolean") params.set("explicit_lyrics", String(selected.explicit_lyrics));
+    const requestStartedAt = performance.now();
     try {
       const response = await fetch(`${apiBaseUrl}/api/audio/resolve?${params}`, { signal: request.signal });
       if (!response.ok) {
@@ -2134,23 +2231,15 @@ const musicPlayer = (() => {
         row.append(open);
         reports.append(row);
       }
-      diagnosticsEnabled = Boolean(result.diagnostics);
-      diagnosticPanel.hidden = !diagnosticsEnabled;
-      if (diagnosticsEnabled) {
-        const safe = {};
-        const fields = ["elapsed_ms", "search_elapsed_ms", "metadata_enrichment_elapsed_ms",
-          "metadata_enrichment_requests", "metadata_lookup_elapsed_ms", "stream_preparation_elapsed_ms",
-          "matching_elapsed_ms", "metadata_status", "player_relative", "player_valid", "redirect_status",
-          "redirect_valid"];
-        for (const key of fields) if (["number", "boolean"].includes(typeof result.diagnostics[key])) safe[key] = result.diagnostics[key];
-        if (Array.isArray(result.diagnostics.metadata_enrichment_ids)
-            && result.diagnostics.metadata_enrichment_ids.every(id => /^[0-9]{1,12}$/.test(id))) {
-          safe.metadata_enrichment_ids = result.diagnostics.metadata_enrichment_ids;
-        }
-        for (const key of ["player_format", "redirect_format"]) if (["cuts", "music", "missing", "unsupported"].includes(result.diagnostics[key])) safe[key] = result.diagnostics[key];
-        if (/^(ru\.hitmox\.org|cdn(?:7|11|13|14|17)\.deliciousoranges\.com|s4\.deliciouspeaches\.com|unapproved)$/.test(result.diagnostics.redirect_host || "")) safe.redirect_host = result.diagnostics.redirect_host;
-        document.querySelector("#source-diagnostics-data").textContent = JSON.stringify(safe, null, 2);
-      }
+      renderSourceDiagnostics(result.diagnostics, {
+        overall_resolve_elapsed_ms: Math.round(performance.now() - requestStartedAt),
+        source_search_network: candidateId ? "not performed; direct candidate resolution"
+          : result.reused_cache ? "not performed; discovery cache hit" : "performed",
+        candidate_resolution_network: candidateId
+          ? result.reused_cache ? "not performed; response cache hit" : "performed"
+          : "not performed; deferred until Play",
+        audio_stream_network: "not started; browser playback has not been initiated",
+      });
       playbackState.textContent = result.source === "hitmos" && result.status === "external_player" ? "Плеер на Hitmos" : result.status === "available" ? "Выберите запись" : "Источник недоступен";
       showCandidates(Array.isArray(result.candidates) ? result.candidates : [], result.source);
       if (["hitmos", "youtube", "auto"].includes(result.source)) {

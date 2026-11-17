@@ -1,4 +1,5 @@
 import socket
+from types import SimpleNamespace
 
 import pytest
 
@@ -59,6 +60,54 @@ def test_audio_signature_and_content_type_checks():
     assert audio_content_type("audio/mpeg")
     assert audio_content_type("application/octet-stream")
     assert not audio_content_type("text/html")
+
+
+def test_deferred_proxy_registration_uses_the_playback_range_for_validation(monkeypatch):
+    import asyncio
+
+    from musicstream.audio_providers import hitmos_stream
+
+    class Response:
+        status = 206
+
+        def __init__(self):
+            self.data = b"ID3\x04"
+
+        def getheader(self, name, default=None):
+            return {
+                "Content-Type": "audio/mpeg",
+                "Content-Range": "bytes 0-3/4",
+                "Content-Length": "4",
+                "Accept-Ranges": "bytes",
+            }.get(name, default)
+
+        def read(self, _size):
+            data, self.data = self.data, b""
+            return data
+
+        def close(self):
+            pass
+
+    upstream = SimpleNamespace(response=Response(), final_url="https://cdn.example.net/audio.mp3", close=lambda: None)
+    requests = []
+
+    async def open_checked(url, range_value, proxy_url=None):
+        requests.append((url, range_value))
+        return upstream
+
+    monkeypatch.setattr(hitmos_stream, "_open_checked", open_checked)
+
+    async def run():
+        proxy = hitmos_stream.HitmosStreamProxy()
+        source = await proxy.register("https://cdn.example.net/audio.mp3")
+        assert requests == []
+        opened = await proxy.open(source.token, "bytes=0-3")
+        assert opened.status_code == 206
+        assert opened.headers["Content-Range"] == "bytes 0-3/4"
+        assert [chunk async for chunk in opened.body()] == [b"ID3\x04"]
+        assert requests == [("https://cdn.example.net/audio.mp3", "bytes=0-3")]
+
+    asyncio.run(run())
 
 
 def test_dns_rejects_a_mixed_public_and_private_answer(monkeypatch):

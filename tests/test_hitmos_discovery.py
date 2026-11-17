@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi.testclient import TestClient
 
-from musicstream.audio_providers.base import RecordingReference, SourceDocument
+from musicstream.audio_providers.base import RecordingReference, ResolutionDiagnostics, SourceDocument
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
 from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, can_use_lab_stream_url_directly, document_kind, redirect_target, request_action
 from musicstream.audio_providers.matching import assess
@@ -73,13 +73,32 @@ def test_unique_exact_match_uses_search_metadata_without_opening_song_page():
 def test_play_resolves_only_the_selected_candidate_after_discovery():
     async def run():
         reader = Reader()
-        provider = HitmosProvider(reader)
+        provider = HitmosProvider(reader, diagnostics_enabled=True)
         discovered = await provider.find(REF)
         result = await provider.prepare(REF, discovered.selected_id)
         assert result.status == "available" and result.candidates[0].method == "html_audio"
         cached = await provider.prepare(REF, discovered.selected_id)
-        assert cached.status == "available"
+        assert cached.status == "available" and cached.reused_cache is True
+        assert cached.diagnostics is None
         assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
+    asyncio.run(run())
+
+
+def test_discovery_cache_marks_reuse_and_drops_stale_diagnostics():
+    async def run():
+        class TimedReader(Reader):
+            async def read_search(self, query):
+                document = await super().read_search(query)
+                return SourceDocument(document.html, diagnostics=ResolutionDiagnostics(elapsed_ms=12))
+
+        provider = HitmosProvider(TimedReader(), diagnostics_enabled=True)
+        service = SourceSelectionService({"hitmos": provider})
+        first = await service.discover(REF)
+        second = await service.discover(REF)
+        assert first.selection == second.selection == "automatic"
+        assert first.reused_cache is False and first.diagnostics is not None
+        assert second.reused_cache is True and second.diagnostics is None
+
     asyncio.run(run())
 
 

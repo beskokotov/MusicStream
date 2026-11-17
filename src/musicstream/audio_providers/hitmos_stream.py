@@ -381,6 +381,32 @@ class HitmosStreamProxy:
         self._retry_until = 0.0
         self.proxy_url = configured_hitmos_proxy() if proxy_url is None else proxy_url
 
+    async def register(self, url: str) -> ValidatedAudioSource:
+        """Mint a local playback token without making a duplicate CDN probe.
+
+        The first browser Range request goes through ``open`` and is checked for
+        public DNS, HTTPS, redirects, a valid 206 response, audio content type,
+        and an audio signature before any bytes are returned.
+        """
+        if not validated_audio_url(url):
+            raise SourceFailure("audio_url_rejected", owner="local_policy")
+        final_url = url
+        token = await self._store_token(final_url)
+        return ValidatedAudioSource(token=token, host=diagnostic_host(final_url),
+            path_type=_path_type(final_url), content_type="unverified")
+
+    async def _store_token(self, final_url: str) -> str:
+        token = secrets.token_urlsafe(32)
+        async with self._lock:
+            now = time.monotonic()
+            for expired in [key for key, item in self._tokens.items() if item.expires_at <= now]:
+                del self._tokens[expired]
+            self._tokens[token] = _ProxyToken(final_url, now + self.ttl_seconds)
+            self._tokens.move_to_end(token)
+            while len(self._tokens) > self.max_tokens:
+                self._tokens.popitem(last=False)
+        return token
+
     async def probe_and_register(self, url: str) -> ValidatedAudioSource:
         if time.monotonic() < self._retry_until:
             wait = max(1, int(self._retry_until - time.monotonic()))
@@ -410,15 +436,7 @@ class HitmosStreamProxy:
                                     path_type=_path_type(upstream.final_url), stage="http_range",
                                     http_status=upstream.response.status)
             final_url = upstream.final_url
-            token = secrets.token_urlsafe(32)
-            async with self._lock:
-                now = time.monotonic()
-                for expired in [key for key, item in self._tokens.items() if item.expires_at <= now]:
-                    del self._tokens[expired]
-                self._tokens[token] = _ProxyToken(final_url, now + self.ttl_seconds)
-                self._tokens.move_to_end(token)
-                while len(self._tokens) > self.max_tokens:
-                    self._tokens.popitem(last=False)
+            token = await self._store_token(final_url)
             return ValidatedAudioSource(token=token, host=diagnostic_host(final_url),
                 path_type=_path_type(final_url),
                 content_type="audio" if (upstream.response.getheader("Content-Type", "").lower().startswith("audio/")) else "octet_stream")

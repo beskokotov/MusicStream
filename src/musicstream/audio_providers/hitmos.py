@@ -245,7 +245,7 @@ class HitmosProvider(AudioProvider):
         cached = self._prepared_cache.get(key)
         if cached:
             self._prepared_cache.move_to_end(key)
-            return cached[1].model_copy(deep=True)
+            return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
         result = await self.lookup(recording, candidate_id)
         self._cache_prepared(recording, candidate_id, result,
                              45 if result.status == "available" else 15)
@@ -272,6 +272,14 @@ class HitmosProvider(AudioProvider):
         request_ids = []
         metadata_lookup_ms = 0
         stream_preparation_ms = 0
+        browser_profile_fields = (
+            "browser_context_create_elapsed_ms", "browser_page_create_elapsed_ms",
+            "domcontentloaded_elapsed_ms", "document_body_elapsed_ms",
+            "jsonld_extraction_elapsed_ms", "player_json_extraction_elapsed_ms",
+            "player_redirect_elapsed_ms",
+            "browser_request_count", "browser_navigation_count",
+        )
+        browser_profile_totals = {name: 0 for name in browser_profile_fields}
         if recording.duration_seconds is None:
             if diagnostics is not None:
                 diagnostics.metadata_enrichment_elapsed_ms = 0
@@ -326,6 +334,12 @@ class HitmosProvider(AudioProvider):
                 checked_candidate = next((item for item in checked.candidates if item.id == candidate.id), None)
                 if checked_candidate is None:
                     continue
+                checked_diagnostics = checked.diagnostics
+                if checked_diagnostics is not None:
+                    for name in browser_profile_fields:
+                        value = getattr(checked_diagnostics, name, None)
+                        if isinstance(value, int):
+                            browser_profile_totals[name] += value
                 original = by_id[candidate.id]
                 by_id[candidate.id] = original.model_copy(update={
                     "title": checked_candidate.title,
@@ -352,6 +366,9 @@ class HitmosProvider(AudioProvider):
                 selected_id = candidate.id
                 break
         if diagnostics is not None:
+            for name, value in browser_profile_totals.items():
+                if value:
+                    setattr(diagnostics, name, (getattr(diagnostics, name, None) or 0) + value)
             diagnostics.metadata_enrichment_elapsed_ms = round((time.monotonic() - enrichment_started) * 1000)
             diagnostics.metadata_enrichment_requests = request_count
             diagnostics.metadata_enrichment_ids = request_ids
@@ -374,15 +391,19 @@ class HitmosProvider(AudioProvider):
                 del self._search_cache[expired]
             cached = self._search_cache.get(key)
             if cached:
-                return cached[1].model_copy(deep=True)
+                return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
             try:
                 started_at = time.monotonic()
                 document = await self.reader.read_search(f"{recording.artist} {recording.title}")
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.search_elapsed_ms = document.diagnostics.elapsed_ms
                 html = document.html if isinstance(document, SourceDocument) else document
+                extraction_started = time.monotonic()
                 ids = parse_search_ids(html)
                 search_metadata = parse_search_metadata(html, ids)
+                if isinstance(document, SourceDocument) and document.diagnostics is not None:
+                    document.diagnostics.search_extraction_elapsed_ms = round(
+                        (time.monotonic() - extraction_started) * 1000)
                 recordings = []
                 failures = 0
                 for song_id in ids[:MAX_SEARCH_CANDIDATES]:
@@ -438,8 +459,16 @@ class HitmosProvider(AudioProvider):
                     "local_http_proxy" if getattr(self.reader, "proxy_url", None) else "direct")
             if len(html.encode("utf-8")) > 262144:
                 raise SourceFailure("response_too_large")
+            extraction_started = time.monotonic()
             title, artist, duration = parse_song(html, song_id)
+            if isinstance(document, SourceDocument) and document.diagnostics is not None:
+                document.diagnostics.jsonld_extraction_elapsed_ms = round(
+                    (time.monotonic() - extraction_started) * 1000)
+            player_parse_started = time.monotonic()
             stream_url, _ = inspect_player_url(html, song_id, lab_mode=self.lab_mode)
+            if isinstance(document, SourceDocument) and document.diagnostics is not None:
+                document.diagnostics.player_json_extraction_elapsed_ms = round(
+                    (time.monotonic() - player_parse_started) * 1000)
             if isinstance(document, SourceDocument):
                 # Never publish the session-dependent first hop after a failed
                 # resolution, and never accept a redirect not on the CDN allowlist.
@@ -459,13 +488,13 @@ class HitmosProvider(AudioProvider):
             if direct and self.lab_mode:
                 if self.stream_proxy is None:
                     raise SourceFailure("lab_proxy_unavailable", stage="stream_resolution", owner="local_policy")
-                validated = await self.stream_proxy.probe_and_register(stream_url)
+                # The playback request itself performs the same DNS-pinned
+                # Range/type/signature checks. Probing here would make the
+                # browser repeat the initial CDN Range request after resolve.
+                validated = await self.stream_proxy.register(stream_url)
                 stream_url = f"/api/audio/hitmos-stream/{validated.token}"
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
-                    document.diagnostics.stage = "http_range"
-                    document.diagnostics.range_status = 206
-                    document.diagnostics.content_type = validated.content_type
-                    document.diagnostics.audio_signature_valid = True
+                    document.diagnostics.stage = "stream_resolution"
                     document.diagnostics.redirect_host = validated.host
                     document.diagnostics.path_type = validated.path_type
             candidate = AudioCandidate(id=song_id, title=title, artist=artist, duration_seconds=duration,

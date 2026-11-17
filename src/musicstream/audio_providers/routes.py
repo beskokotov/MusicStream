@@ -119,7 +119,7 @@ async def resolve_audio(
                                            explicit_lyrics=explicit_lyrics)
             return await request.app.state.source_selection.discover(recording,
                                                                       allow_youtube=allow_youtube)
-        return cached[1].model_copy(deep=True)
+        return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
     retry_after = request.app.state.audio_limiter.check(peer)
     if retry_after:
         raise HTTPException(429, "Source lookup limit reached", headers={"Retry-After": str(retry_after)})

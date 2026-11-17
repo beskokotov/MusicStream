@@ -183,25 +183,38 @@ class HitmosBrowserReader:
         oversized = [False]
         async with self._gate:
             try:
+                browser_was_connected = self._browser is not None and self._browser.is_connected()
+                browser_started_at = time.monotonic()
                 browser = await self._get_browser(async_playwright)
+                if not browser_was_connected:
+                    diagnostics.browser_launch_elapsed_ms = round((time.monotonic() - browser_started_at) * 1000)
                 context = None
                 try:
+                    create_started = time.monotonic()
                     context = await browser.new_context(java_script_enabled=False, accept_downloads=False,
-                                                            user_agent="MusicStream/0.1.0")
+                                                        user_agent="MusicStream/0.1.0")
+                    diagnostics.browser_context_create_elapsed_ms = round((time.monotonic() - create_started) * 1000)
+                    create_started = time.monotonic()
                     page = await context.new_page()
+                    diagnostics.browser_page_create_elapsed_ms = round((time.monotonic() - create_started) * 1000)
                     cdp = await context.new_cdp_session(page)
                     await cdp.send("Network.enable")
                     await cdp.send("Network.setCacheDisabled", {"cacheDisabled": True})
                     main_frame = (await cdp.send("Page.getFrameTree"))["frameTree"]["frame"]["id"]
                     resolution = asyncio.get_running_loop().create_future()
                     state = {"player_url": None, "started": False, "player_request_id": None, "reason": None}
+                    state["player_started_at"] = None
                     received = [0]
                     documents = set()
                     network_document_frames = {}
+                    request_count = [0]
 
                     def track_request(event):
+                        request_count[0] += 1
+                        diagnostics.browser_request_count = request_count[0]
                         if event.get("type") == "Document":
                             documents.add(event["requestId"])
+                            diagnostics.browser_navigation_count = (diagnostics.browser_navigation_count or 0) + 1
                             frame_id = event.get("frameId")
                             if isinstance(frame_id, str):
                                 network_document_frames[event["requestId"]] = frame_id
@@ -237,6 +250,9 @@ class HitmosBrowserReader:
                                 # following a redirect. Even a first-hop audio response
                                 # is aborted: this service resolves URLs, not audio bytes.
                                 if event["requestId"] == state["player_request_id"]:
+                                    if state["player_started_at"] is not None:
+                                        diagnostics.player_redirect_elapsed_ms = round(
+                                            (time.monotonic() - state["player_started_at"]) * 1000)
                                     diagnostics.redirect_status = event.get("responseStatusCode")
                                     locations = [h["value"] for h in event.get("responseHeaders", []) if h["name"].lower() == "location"]
                                     if len(locations) == 1:
@@ -324,6 +340,7 @@ class HitmosBrowserReader:
                                 if action == "player":
                                     state["started"] = True
                                     state["player_request_id"] = event["requestId"]
+                                    state["player_started_at"] = time.monotonic()
                                 # Keep the browser's normal headers and guest session.
                                 await cdp.send("Fetch.continueRequest", {"requestId": event["requestId"], "interceptResponse": True})
                             else:
@@ -350,8 +367,10 @@ class HitmosBrowserReader:
 
                     async def read(path):
                         received[0] = 0
+                        navigation_started = time.monotonic()
                         response = await page.goto("https://ru.hitmox.org" + path,
                                                    wait_until="domcontentloaded", timeout=7000)
+                        diagnostics.domcontentloaded_elapsed_ms = round((time.monotonic() - navigation_started) * 1000)
                         diagnostics.metadata_status = response.status if response else None
                         if not response or response.status != 200 or response.url != "https://ru.hitmox.org" + path:
                             status = response.status if response else diagnostics.metadata_status
@@ -363,7 +382,9 @@ class HitmosBrowserReader:
                                 owner="external_server" if status else "network", http_status=status,
                                 retry_after_seconds=retry_after_seconds(retry_after),
                                 stage="source_search" if search_url else "source_metadata")
+                        body_started = time.monotonic()
                         body = await response.body()
+                        diagnostics.document_body_elapsed_ms = round((time.monotonic() - body_started) * 1000)
                         if oversized[0] or len(body) > self.MAX_BYTES:
                             raise SourceFailure("response_too_large")
                         return body.decode("utf-8", errors="strict")

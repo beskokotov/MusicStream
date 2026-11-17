@@ -1,6 +1,7 @@
 import asyncio
 import html
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -46,6 +47,22 @@ def test_resolved_cdn_is_returned_without_html_or_first_hop():
     assert result.candidates[0].stream_url == CDN
     assert PLAYER not in result.model_dump_json()
     assert "internal-document-not-for-client" not in result.model_dump_json()
+
+
+def test_lab_resolution_registers_token_without_a_duplicate_cdn_probe():
+    class Proxy:
+        calls = []
+
+        async def register(self, url):
+            self.calls.append(url)
+            return SimpleNamespace(token="opaque-token", host="cdn13.deliciousoranges.com",
+                                   path_type="cuts", content_type="unverified")
+
+    proxy = Proxy()
+    result = asyncio.run(HitmosProvider(Reader(), lab_mode=True, stream_proxy=proxy).lookup(REF, ID))
+    assert proxy.calls == [CDN]
+    assert result.candidates[0].stream_url == "/api/audio/hitmos-stream/opaque-token"
+    assert result.diagnostics is None
 
 
 @pytest.mark.parametrize("url", [None, PLAYER, "https://127.0.0.1/private", CDN.replace(ID,"1"),

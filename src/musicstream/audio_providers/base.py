@@ -9,6 +9,17 @@ class ResolutionDiagnostics(BaseModel):
     """Local-only, allowlisted facts. Never store URLs, headers or cookies."""
 
     elapsed_ms: int | None = None
+    browser_launch_elapsed_ms: int | None = None
+    browser_context_create_elapsed_ms: int | None = None
+    browser_page_create_elapsed_ms: int | None = None
+    domcontentloaded_elapsed_ms: int | None = None
+    document_body_elapsed_ms: int | None = None
+    search_extraction_elapsed_ms: int | None = None
+    jsonld_extraction_elapsed_ms: int | None = None
+    player_json_extraction_elapsed_ms: int | None = None
+    player_redirect_elapsed_ms: int | None = None
+    browser_request_count: int | None = None
+    browser_navigation_count: int | None = None
     search_elapsed_ms: int | None = None
     metadata_enrichment_elapsed_ms: int | None = None
     metadata_enrichment_requests: int | None = None
@@ -107,6 +118,7 @@ class DiscoveryBatch(BaseModel):
     complete: bool = True
     auto_candidate_id: str | None = Field(default=None, pattern=r"^[0-9]{1,12}$")
     diagnostics: ResolutionDiagnostics | None = None
+    reused_cache: bool = False
 
 
 class ProviderSummary(BaseModel):
@@ -131,6 +143,7 @@ class SourceResult(BaseModel):
     selected_source: Literal["youtube", "hitmos"] | None = None
     sources: list[ProviderSummary] = Field(default_factory=list)
     reused_match: bool = False
+    reused_cache: bool = False
 
 
 class AudioProvider(ABC):

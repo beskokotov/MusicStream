@@ -92,6 +92,8 @@ class SourceSelectionService:
                 async with self._gates[source]:
                     cached = self._get(self._batches, key)
                     if cached is not None:
+                        cached.reused_cache = True
+                        cached.diagnostics = None
                         return cached
                     async with self._outbound:
                         batch = await provider.discover(recording)
@@ -113,6 +115,8 @@ class SourceSelectionService:
         if (remembered and remembered.selected_source in self.providers
                 and (remembered.selected_source != "youtube" or allow_youtube)):
             remembered.reused_match = True
+            remembered.reused_cache = True
+            remembered.diagnostics = None
             remembered.message = "Повторно выбрано ранее проверенное соответствие метаданных. Нажмите Play: источник будет проверен заново."
             return remembered
         names = [name for name in ("hitmos", "youtube") if name in self.providers and (name != "youtube" or allow_youtube)]
@@ -171,7 +175,8 @@ class SourceSelectionService:
             selection="automatic" if chosen else "choose" if candidates else "none",
             selected_id=chosen.id if chosen else None, selected_source=chosen.source if chosen else None,
             stage="matching" if candidates else "source_search",
-            diagnostics=hitmos_batch.diagnostics if hitmos_batch else None,
+            diagnostics=(hitmos_batch.diagnostics if hitmos_batch and not hitmos_batch.reused_cache else None),
+            reused_cache=bool(hitmos_batch and hitmos_batch.reused_cache),
             sources=[ProviderSummary(**batch.model_dump(include={"source", "status", "reason", "message", "search_url"})) for batch in batches])
         return result
 

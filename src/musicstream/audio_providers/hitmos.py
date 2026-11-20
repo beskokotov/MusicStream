@@ -61,6 +61,10 @@ class _StructuredMetadata(HTMLParser):
 def parse_song(html: str, song_id: str) -> tuple[str, str, float | None]:
     parser = _StructuredMetadata()
     parser.feed(html)
+    return _song_metadata(parser, song_id)
+
+
+def _song_metadata(parser: _StructuredMetadata, song_id: str) -> tuple[str, str, float | None]:
     for block in parser.blocks:
         try:
             item = json.loads(block)
@@ -87,24 +91,31 @@ def parse_song(html: str, song_id: str) -> tuple[str, str, float | None]:
     raise SourceFailure("metadata_unavailable")
 
 
-def parse_search_ids(html: str) -> list[str]:
-    """Use the same document parser; metadata still comes from parse_song."""
+def _parse_search_document(html: str) -> _StructuredMetadata:
     if len(html.encode("utf-8")) > 262144:
         raise SourceFailure("response_too_large", stage="source_search")
     parser = _StructuredMetadata()
     parser.feed(html)
+    return parser
+
+
+def parse_search_ids(html: str) -> list[str]:
     # One extra ID signals truncation: do not declare a unique winner then.
-    return parser.song_ids[:MAX_SEARCH_CANDIDATES + 1]
+    return _parse_search_document(html).song_ids[:MAX_SEARCH_CANDIDATES + 1]
 
 
 def parse_search_metadata(html: str, song_ids: list[str]) -> dict[str, tuple[str, str | None, float | None]]:
     """Read recording metadata already embedded in the search page, when present."""
     parser = _StructuredMetadata()
     parser.feed(html)
+    return _search_metadata(parser, song_ids)
+
+
+def _search_metadata(parser: _StructuredMetadata, song_ids: list[str]) -> dict[str, tuple[str, str | None, float | None]]:
     result = {}
     for song_id in song_ids:
         try:
-            result[song_id] = parse_song(html, song_id)
+            result[song_id] = _song_metadata(parser, song_id)
             continue
         except SourceFailure:
             pass
@@ -378,8 +389,9 @@ class HitmosProvider(AudioProvider):
     @staticmethod
     def _search_recordings(document, recording):
         html = document.html if isinstance(document, SourceDocument) else document
-        ids = parse_search_ids(html)
-        metadata = parse_search_metadata(html, ids)
+        parser = _parse_search_document(html)
+        ids = parser.song_ids[:MAX_SEARCH_CANDIDATES + 1]
+        metadata = _search_metadata(parser, ids[:MAX_SEARCH_CANDIDATES])
         recordings = []
         for song_id in ids[:MAX_SEARCH_CANDIDATES]:
             title, artist, duration = metadata.get(song_id, (recording.title, None, None))
@@ -618,23 +630,19 @@ class HitmosProvider(AudioProvider):
             if isinstance(document, SourceDocument) and document.diagnostics is not None:
                 document.diagnostics.jsonld_extraction_elapsed_ms = round(
                     (time.monotonic() - extraction_started) * 1000)
-            player_parse_started = time.monotonic()
-            stream_url, _ = inspect_player_url(html, song_id)
-            if isinstance(document, SourceDocument) and document.diagnostics is not None:
-                document.diagnostics.player_json_extraction_elapsed_ms = round(
-                    (time.monotonic() - player_parse_started) * 1000)
-            if isinstance(document, SourceDocument):
-                # Only the Browser Reader can supply this URL after observing
-                # the requested Hitmos page's player response and redirect.
-                stream_url = document.stream_url if not document.playback_reason else None
-                if not (stream_url and valid_stream_url(stream_url, song_id)):
-                    stream_url = None
             match = assess_hitmos(recording, title, artist, duration)
             if metadata_only:
                 return SourceResult(source="hitmos", status="external_player", reason="metadata_checked",
                     stage="matching", message="Метаданные проверены; доступность потока будет проверена по Play.",
                     search_url=url, candidates=[AudioCandidate(id=song_id, title=title, artist=artist,
                         duration_seconds=duration, match=match, method="external_link", external_url=url)])
+            if isinstance(document, SourceDocument):
+                # The Reader already inspected the player and checked the observed redirect.
+                stream_url = document.stream_url if not document.playback_reason else None
+                if not (stream_url and valid_stream_url(stream_url, song_id)):
+                    stream_url = None
+            else:
+                stream_url, _ = inspect_player_url(html, song_id)
             direct = bool(stream_url) and match.status != "mismatch"
             if direct and self.stream_proxy is not None:
                 # Keep the HTMLAudioElement on a same-origin URL. Its Range

@@ -40,7 +40,11 @@ def action(url, resource="Document", method="GET", frame="main", player=PLAYER, 
     return request_action(url, resource, method, frame, "main", ID, player, started)
 
 
-def test_resolved_cdn_is_returned_without_html_or_first_hop():
+def test_resolved_cdn_is_returned_without_html_or_first_hop(monkeypatch):
+    def unexpected_player_parse(*args):
+        pytest.fail("The provider must use the Reader's observed redirect without parsing the player again")
+
+    monkeypatch.setattr("musicstream.audio_providers.hitmos.inspect_player_url", unexpected_player_parse)
     result = asyncio.run(HitmosProvider(Reader()).lookup(REF, ID))
     assert result.status == "available"
     assert result.candidates[0].method == "html_audio"

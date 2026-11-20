@@ -394,7 +394,10 @@ class HitmosBrowserReader:
                     html = await read(target.path + ("?" + target.query if target.query else ""))
                     if metadata_only:
                         return result(html)
+                    player_parse_started = time.monotonic()
                     player_url, inspection = inspect_player_url(html, song_id)
+                    diagnostics.player_json_extraction_elapsed_ms = round(
+                        (time.monotonic() - player_parse_started) * 1000)
                     diagnostics.player_format = inspection.player_format
                     diagnostics.player_relative = inspection.player_relative
                     diagnostics.player_valid = inspection.player_valid

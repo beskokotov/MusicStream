@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from musicstream.audio_providers.base import RecordingReference, ResolutionDiagnostics, SourceDocument
-from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
+from musicstream.audio_providers.hitmos import HitmosProvider, _StructuredMetadata, parse_search_ids, parse_search_metadata
 from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, document_kind, redirect_target, request_action
 from musicstream.audio_providers.matching import assess, assess_hitmos
 from musicstream.audio_providers.service import SourceSelectionService
@@ -376,6 +376,25 @@ def test_search_embedded_track_metadata_is_used_without_page_navigation():
             '"artist":"Rammstein","duration_seconds":272}\'></div>')
     assert parse_search_ids(html) == ["91"]
     assert parse_search_metadata(html, ["91"]) == {"91": ("Sonne", "Rammstein", 272)}
+
+
+def test_hitmos_search_parses_html_once_for_ids_and_metadata(monkeypatch):
+    songs = {str(i): ("Sonne", "Rammstein", 271 + i) for i in range(1, 7)}
+    document = asyncio.run(Reader(songs).read_search("Rammstein Sonne"))
+    original = _StructuredMetadata.feed
+    parsed = []
+
+    def count_parses(parser, html):
+        parsed.append(html)
+        original(parser, html)
+
+    monkeypatch.setattr(_StructuredMetadata, "feed", count_parses)
+    candidates, complete = HitmosProvider._search_recordings(document, REF)
+    assert parsed == [document.html]
+    assert not complete
+    assert [(item.id, item.duration_seconds) for item in candidates] == [
+        (str(i), 271 + i) for i in range(1, 6)
+    ]
 
 
 def test_duplicate_exact_matches_are_retained_for_playback_fallback():

@@ -9,6 +9,7 @@ pytest.importorskip("playwright.async_api")
 
 from playwright.async_api import async_playwright
 
+from musicstream.audio_providers.base import RecordingReference
 from musicstream.audio_providers.hitmos import HitmosProvider
 from musicstream.audio_providers.service import SourceSelectionService
 from test_hitmos_discovery import REF, Reader
@@ -48,6 +49,8 @@ async def main():
     sequential_track = False
     sequential_success = False
     budget_stage = None
+    trial_track = None
+    trial_prepared = None
     audio_token = "/api/audio/hitmos-stream/" + "A" * 32
     broken_audio_token = "/api/audio/hitmos-stream/" + "B" * 32
     async with async_playwright() as runtime:
@@ -66,6 +69,8 @@ async def main():
             async def route_handler(route):
                 url = route.request.url
                 if "/api/search?" in url:
+                    if trial_track:
+                        return await route.fulfill(json=[trial_track])
                     return await route.fulfill(json=[{"id": "1", "title": "Sonne", "artist": "Rammstein",
                         "duration_seconds": 272, "explicit_lyrics": explicit_track, "source": "deezer"}])
                 if "/api/audio/resolve?" in url:
@@ -77,9 +82,15 @@ async def main():
                             "retry_after_seconds": 17, "candidates": []})
                     if "hitmos_id" in params:
                         song_id = params["hitmos_id"][0]
+                        if trial_track:
+                            assert song_id == "64870791" and params.get("hitmos_trial") == ["true"]
+                            return await route.fulfill(json=trial_prepared)
                         if sequential_track:
-                            if song_id == "4" or (song_id == "5" and not sequential_success):
+                            if song_id == "4":
                                 return await route.fulfill(status=503)
+                            if song_id == "5" and not sequential_success:
+                                return await route.fulfill(json={"status": "external_player", "stage": "stream_resolution",
+                                    "reason": "stream_redirect_not_allowed", "diagnostics": {"stage": "redirect"}})
                             prepared = await sequential_provider.lookup(REF, song_id)
                             prepared.candidates[0].stream_url = broken_audio_token if song_id == "6" else audio_token
                             return await route.fulfill(json=prepared.model_dump())
@@ -268,10 +279,20 @@ async def main():
             def attempted_ids():
                 return [parse_qs(urlsplit(url).query).get("hitmos_id", [None])[0] for url in requests]
 
+            only_candidate = next(item for item in sequential["candidates"] if item["id"] == "5")
+            scenario[0] = {**sequential, "hitmos_manual_selection": True, "candidates": [only_candidate]}
+            requests.clear()
+            await select_after_reload()
+            await page.locator("#source-candidates .source-candidate").wait_for()
+            assert attempted_ids() == [None]
+            scenario[0] = sequential
+
             requests.clear()
             await select_after_reload()
             await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
             assert attempted_ids() == [None, "4", "6", "5"]
+            await page.get_by_text(
+                "Этап: проверка перенаправления. Hitmos: stream_redirect_not_allowed.", exact=True).wait_for()
             assert await page.evaluate("(key) => localStorage.getItem(key)", key) is None
 
             sequential_success = True
@@ -301,6 +322,66 @@ async def main():
             await select_after_reload()
             await page.get_by_text("Повторите попытку через 17 с.", exact=False).wait_for()
             assert attempted_ids() == [None]
+
+            budget_stage = None
+            ref = RecordingReference(title="I Think I'm OKAY", artist="Machine Gun Kelly, YUNGBLUD, Travis Barker",
+                                     duration_seconds=170, explicit_lyrics=True)
+            reader = Reader({"64870791": (ref.title, "Travis Barker, Machine Gun Kelly, YUNGBLUD", 170)})
+            prepared = await HitmosProvider(reader).lookup(ref, "64870791")
+            item = prepared.candidates[0].model_copy(update={"source": "hitmos",
+                "method": "external_link", "stream_url": None, "match_score": 1.0,
+                "selection_reason": "manual_confirmation_required"}).model_dump()
+            prepared.candidates[0].stream_url = audio_token
+            trial_prepared = prepared.model_dump()
+            trial_track = {"id": "705273532", "title": ref.title, "artist": "Machine Gun Kelly",
+                           "duration_seconds": 170, "explicit_lyrics": True, "source": "deezer"}
+            trial = {**sequential, "hitmos_manual_selection": True, "hitmos_trial_candidate_id": "64870791",
+                     "candidates": [item]}
+            await sequence_preference.uncheck()
+            await preference.check()
+            scenario[0] = trial
+            requests.clear()
+            await select_after_reload()
+            await page.locator("#source-candidates .source-candidate").wait_for()
+            assert attempted_ids() == [None]
+
+            await sequence_preference.check()
+            await preference.uncheck()
+            requests.clear()
+            await select_after_reload()
+            await page.locator("#source-candidates .source-candidate").wait_for()
+            assert attempted_ids() == [None]
+
+            await preference.check()
+            conflicts = [
+                [{**item, "match": {**item["match"], "status": "mismatch", "explicit_status": "conflicting"}}],
+                [{**item, "match": {**item["match"], "status": "uncertain", "reasons": ["version_differs"]}}],
+                [item, {**item, "id": "64870792"}],
+            ]
+            for rows in conflicts:
+                scenario[0] = {**trial, "candidates": rows}
+                requests.clear()
+                await select_after_reload()
+                await page.locator("#source-candidates .source-candidate").first.wait_for()
+                assert attempted_ids() == [None]
+
+            scenario[0] = trial
+            good_preparation = trial_prepared
+            trial_prepared = {**trial_prepared, "candidates": [
+                {**trial_prepared["candidates"][0], "match": {**item["match"],
+                    "comparison": {**item["match"]["comparison"], "candidate_duration_seconds": 200}}},
+            ]}
+            requests.clear()
+            await select_after_reload()
+            await page.get_by_text("Этап: сопоставление записей. Hitmos: hitmos_candidate_rejected.").wait_for()
+            assert attempted_ids() == [None, "64870791"]
+
+            trial_prepared = good_preparation
+            requests.clear()
+            await select_after_reload()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('is-playing')")
+            assert attempted_ids() == [None, "64870791"]
+            assert await page.evaluate("localStorage.getItem('musicstream.hitmos.match.v1.705273532')") is None
             assert not errors, errors
             print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:

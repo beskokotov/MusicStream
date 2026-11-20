@@ -144,13 +144,15 @@ async def resolve_audio(
     deezer_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,20}$")] = None,
     exclude_hitmos_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,12}$")] = None,
     allow_unknown_hitmos_explicit: bool = False,
+    hitmos_trial: bool = False,
 ):
     peer = request.client.host if request.client else "unknown"
     cache_key = (title.strip(), artist.strip(), duration_seconds, explicit_lyrics,
                  provider, hitmos_id or candidate_id, allow_youtube, deezer_id, exclude_hitmos_id,
-                 allow_unknown_hitmos_explicit)
+                 allow_unknown_hitmos_explicit, hitmos_trial)
     cache = request.app.state.audio_response_cache
-    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id", "exclude_hitmos_id", "allow_unknown_hitmos_explicit"}
+    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id", "exclude_hitmos_id", "allow_unknown_hitmos_explicit", "hitmos_trial"}
+            or (hitmos_trial and (provider != "hitmos" or not hitmos_id))
             or (allow_unknown_hitmos_explicit and (provider == "youtube" or hitmos_id or candidate_id))
             or (exclude_hitmos_id is not None and provider != "auto")
             or not title.strip() or not artist.strip() or (hitmos_id and provider != "hitmos")
@@ -186,7 +188,8 @@ async def resolve_audio(
                              else 10)
         async with asyncio.timeout(operation_timeout):
             if hitmos_id or candidate_id:
-                result = await request.app.state.source_selection.prepare(recording, provider, hitmos_id or candidate_id)
+                result = await request.app.state.source_selection.prepare(
+                    recording, provider, hitmos_id or candidate_id, remember_match=not hitmos_trial)
             elif provider == "auto":
                 result = await request.app.state.source_selection.discover(
                     recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)

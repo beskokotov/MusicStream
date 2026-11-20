@@ -10,7 +10,7 @@ from urllib.parse import urlencode
 from musicstream.audio_providers.base import DiscoveryBatch, ProviderSummary, RecordingReference, SourceResult
 from musicstream.audio_providers.hitmos import valid_stream_url
 from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, hitmos_unknown_explicit_match, rank_batch
-from musicstream.audio_providers.matching import normalize, versions
+from musicstream.audio_providers.matching import normalize, same_hitmos_artists, versions
 
 logger = logging.getLogger(__name__)
 
@@ -31,14 +31,12 @@ def _equivalent_hitmos_group(recording: RecordingReference, candidates):
     if len(candidates) < 2 or recording.duration_seconds is None:
         return []
     wanted_title = normalize(recording.title)
-    wanted_artist = normalize(recording.artist)
     wanted_versions = versions(f"{recording.title} {recording.artist}")
     durations = []
     for candidate in candidates:
         if (candidate.source != "hitmos" or candidate.match.status != "likely"
                 or not exact_metadata(recording, candidate)
                 or normalize(candidate.title) != wanted_title
-                or normalize(candidate.artist or "") != wanted_artist
                 or versions(f"{candidate.title} {candidate.artist or ''}") != wanted_versions
                 or candidate.duration_seconds is None):
             return []
@@ -127,6 +125,7 @@ class SourceSelectionService:
             batches = [batch.model_copy(update={
                 "recordings": [item for item in batch.recordings if item.id != exclude_hitmos_id],
                 "auto_candidate_id": None if batch.auto_candidate_id == exclude_hitmos_id else batch.auto_candidate_id,
+                "hitmos_trial_candidate_id": None if batch.hitmos_trial_candidate_id == exclude_hitmos_id else batch.hitmos_trial_candidate_id,
             }) if batch.source == "hitmos" else batch for batch in batches]
         if not allow_youtube:
             batches.append(DiscoveryBatch(source="youtube", status="blocked", reason="consent_required",
@@ -142,7 +141,7 @@ class SourceSelectionService:
         eligible = [c for c in candidates if c.match.status != "mismatch"
                     and (c.source != "hitmos" or (
                         normalize(c.title) == normalize(recording.title)
-                        and (not c.artist or normalize(c.artist) == normalize(hitmos_reference.artist))))]
+                        and (not c.artist or same_hitmos_artists(hitmos_reference.artist, c.artist))))]
         complete = all(batch.complete for batch in batches if batch.status == "ok") and not any(batch.status == "error" for batch in batches)
         confirmed = [candidate for candidate in eligible if candidate.match.status == "likely"]
         equivalent_group = _equivalent_hitmos_group(hitmos_reference, confirmed)
@@ -192,6 +191,8 @@ class SourceSelectionService:
             search_url=search_url("hitmos", recording), candidates=candidates,
             selection="automatic" if chosen else "choose" if candidates else "none",
             selected_id=chosen.id if chosen else None, selected_source=chosen.source if chosen else None,
+            hitmos_manual_selection=bool(hitmos_batch and not hitmos_batch.complete and hitmos_batch.hitmos_manual_selection),
+            hitmos_trial_candidate_id=hitmos_batch.hitmos_trial_candidate_id if hitmos_batch and not hitmos_batch.complete else None,
             stage="matching" if candidates else "source_search",
             diagnostics=(hitmos_batch.diagnostics if hitmos_batch and not hitmos_batch.reused_cache else None),
             reused_cache=bool(hitmos_batch and hitmos_batch.reused_cache),
@@ -227,7 +228,7 @@ class SourceSelectionService:
             for cached in [k for k in self._batches if k[0] == source and k[2] == key]:
                 del self._batches[cached]
 
-    async def prepare(self, recording, source, candidate_id):
+    async def prepare(self, recording, source, candidate_id, *, remember_match=True):
         pattern = r"[0-9]{1,12}" if source == "hitmos" else r"[a-zA-Z0-9_-]{11}"
         if source not in self.providers or not re.fullmatch(pattern, candidate_id):
             raise ValueError("Invalid source candidate")
@@ -240,6 +241,7 @@ class SourceSelectionService:
             logger.warning("Audio source preparation failed (%s)", type(exc).__name__)
             result = SourceResult(source=source, status="error", reason="provider_error", stage="stream_resolution",
                 message="Не удалось подготовить источник. Можно открыть оригинальный сервис.", search_url=search_url(source, recording))
-        if result.reason != "request_budget_exhausted" and (result.status != "available" or not self.remember(recording, result)):
+        if (remember_match and result.reason != "request_budget_exhausted"
+                and (result.status != "available" or not self.remember(recording, result))):
             self.forget(recording, source, candidate_id)
         return result

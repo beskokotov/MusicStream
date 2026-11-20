@@ -25,8 +25,21 @@ def versions(title: str) -> set[str]:
     return {"remaster" if tag == "remastered" else tag for tag in VERSIONS if f" {tag} " in normalized}
 
 
+def same_hitmos_artists(reference: str, candidate: str | None) -> bool:
+    expected = [normalize(credit) for credit in reference.split(",")]
+    actual = [normalize(credit) for credit in (candidate or "").split(",")]
+    return bool(all(expected) and all(actual) and sorted(expected) == sorted(actual))
+
+
 def assess_hitmos(recording, title, artist, duration):
-    match = assess(recording, title, artist, duration)
+    same_artists = same_hitmos_artists(recording.artist, artist)
+    match = assess(recording, title, recording.artist if same_artists else artist, duration)
+    if match.comparison is not None:
+        match.comparison.candidate_artist = artist
+    if not same_artists and "," in recording.artist and "," in (artist or "") and "artist_unconfirmed" not in match.reasons:
+        match.reasons.append("artist_unconfirmed")
+        if match.status == "likely":
+            match.status = "uncertain"
     labels = versions(title)
     expected = versions(recording.title)
     if (("clean" in labels and (recording.explicit_lyrics is True or "explicit" in expected))

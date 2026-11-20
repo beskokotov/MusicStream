@@ -9,7 +9,7 @@ from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlsplit
 
 from musicstream.audio_providers.base import AudioCandidate, AudioProvider, DiscoveredRecording, DiscoveryBatch, RecordingReference, ResolutionDiagnostics, SourceDocument, SourceResult
-from musicstream.audio_providers.matching import assess, assess_hitmos, normalize, versions
+from musicstream.audio_providers.matching import assess_hitmos, normalize, same_hitmos_artists, versions
 from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, rank_batch
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.providers.base import ProviderError
@@ -293,7 +293,7 @@ class HitmosProvider(AudioProvider):
             -(candidate.match_score or 0),
             {"likely": 0, "uncertain": 1, "mismatch": 2}[candidate.match.status],
         ))
-        wanted_title, wanted_artist = normalize(recording.title), normalize(recording.artist)
+        wanted_title = normalize(recording.title)
         # A tied group with missing durations needs comparison before selection.
         require_unique = sum(hitmos_missing_duration_match(recording, candidate) for candidate in ranked) > 1
         by_id = {item.id: item for item in recordings}
@@ -302,7 +302,7 @@ class HitmosProvider(AudioProvider):
         for ranked_candidate in ranked:
             if (ranked_candidate.match_score is None or ranked_candidate.match_score < .90
                     or normalize(ranked_candidate.title) != wanted_title
-                    or normalize(ranked_candidate.artist or "") != wanted_artist
+                    or not same_hitmos_artists(recording.artist, ranked_candidate.artist)
                     or versions(f"{ranked_candidate.title} {ranked_candidate.artist or ''}")
                     != versions(f"{recording.title} {recording.artist}")):
                 continue
@@ -359,7 +359,7 @@ class HitmosProvider(AudioProvider):
             if (not require_unique and candidate.match_score is not None and candidate.match_score >= .90
                     and candidate.match.status == "likely"
                     and normalize(candidate.title) == wanted_title
-                    and normalize(candidate.artist or "") == wanted_artist
+                    and same_hitmos_artists(recording.artist, candidate.artist)
                     and versions(f"{candidate.title} {candidate.artist or ''}")
                     == versions(f"{recording.title} {recording.artist}")):
                 selected_id = candidate.id
@@ -411,10 +411,10 @@ class HitmosProvider(AudioProvider):
         return recording.model_copy(update={"artist": artist}) if len(artist) <= 200 else recording
 
     async def _search_by_coartist(self, recording, primary_recordings):
-        wanted_title, wanted_artist = normalize(recording.title), normalize(recording.artist)
+        wanted_title = normalize(recording.title)
         if any(normalize(item.title) == wanted_title
-               and normalize(item.artist or "") in {"", wanted_artist}
-               and assess(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"
+               and (not normalize(item.artist or "") or same_hitmos_artists(recording.artist, item.artist))
+               and assess_hitmos(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"
                for item in primary_recordings):
             return None
 
@@ -423,7 +423,6 @@ class HitmosProvider(AudioProvider):
         artists = [name.strip() for name in recording.artist.split(",")]
         if len(artists) < 2 or not all(artists) or len({normalize(name) for name in artists}) < 2:
             return None
-        wanted_artist = normalize(recording.artist)
         coartist = artists[-1]
         query = f"{coartist} {recording.title}"
         try:
@@ -435,40 +434,53 @@ class HitmosProvider(AudioProvider):
             return None
         candidates = [item for item in recordings if normalize(item.title) == wanted_title
                       and normalize(coartist) in {normalize(name) for name in (item.artist or "").split(",")}
-                      and assess(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"]
+                      and assess_hitmos(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"]
         if not candidates:
             return None
+        if not complete:
+            # A record found by the primary search still competes once Deezer credits are available.
+            ids = {item.id for item in candidates}
+            candidates.extend(item for item in primary_recordings if item.id not in ids
+                              and normalize(item.title) == wanted_title
+                              and same_hitmos_artists(recording.artist, item.artist)
+                              and assess_hitmos(recording, item.title, item.artist, item.duration_seconds).status != "mismatch")
+        return candidates, complete, document, query, recording.artist
+
+    async def _verify_coartist_candidate(self, recording, candidates, complete):
         # Search credits may use a stage name. Only the full song page can
         # confirm the original artist list before automatic playback.
-        if len(candidates) == 1 and complete:
-            candidate = candidates[0]
-            if not hasattr(self.reader, "read_song"):
-                return None
-            try:
-                async with asyncio.timeout(STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS):
-                    prepared = await self.prepare(recording, candidate.id)
-            except TimeoutError:
-                return None
-            if prepared.reason == "request_budget_exhausted":
-                raise SourceFailure(prepared.reason, retry_after_seconds=prepared.retry_after_seconds)
-            verified = next((item for item in prepared.candidates if item.id == candidate.id), None)
-            if not verified:
-                return None
-            exact_names = (normalize(verified.title) == wanted_title
-                           and normalize(verified.artist or "") == wanted_artist)
-            explicit_unknown = (exact_names and verified.match.explicit_status == "unknown"
-                                and verified.match.reasons == ["explicit_unconfirmed"])
-            explicit_conflict = (verified.match.explicit_status == "conflicting"
-                                 and normalize(verified.title).removesuffix(" clean") == wanted_title
-                                 and normalize(verified.artist or "") == wanted_artist
-                                 and "duration_differs" not in verified.match.reasons
-                                 and "duration_unknown" not in verified.match.reasons)
-            if not (exact_metadata(recording, verified) or explicit_unknown or explicit_conflict):
-                return None
-            candidates = [candidate.model_copy(update={
-                "title": verified.title, "artist": verified.artist, "duration_seconds": verified.duration_seconds,
-            })]
-        return candidates, complete, document, query, recording.artist
+        if len(candidates) != 1:
+            return candidates, None, None
+        candidate = candidates[0]
+        unverified = [] if complete else candidates
+        if not hasattr(self.reader, "read_song"):
+            return unverified, None, None
+        try:
+            async with asyncio.timeout(STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS):
+                prepared = (await self.prepare(recording, candidate.id) if complete
+                            else await self.lookup(recording, candidate.id, metadata_only=True))
+        except TimeoutError:
+            return unverified, None, None
+        if prepared.reason == "request_budget_exhausted":
+            return candidates, prepared.retry_after_seconds, None
+        verified = next((item for item in prepared.candidates if item.id == candidate.id), None)
+        if not verified:
+            return unverified, None, None
+        wanted_title = normalize(recording.title)
+        exact_artist = same_hitmos_artists(recording.artist, verified.artist)
+        explicit_unknown = (normalize(verified.title) == wanted_title and exact_artist
+                            and verified.match.explicit_status == "unknown"
+                            and verified.match.reasons == ["explicit_unconfirmed"])
+        explicit_conflict = (verified.match.explicit_status == "conflicting" and exact_artist
+                             and normalize(verified.title).removesuffix(" clean") == wanted_title
+                             and "duration_differs" not in verified.match.reasons
+                             and "duration_unknown" not in verified.match.reasons)
+        if not (exact_metadata(recording, verified.model_copy(update={"source": "hitmos"}))
+                or explicit_unknown or explicit_conflict):
+            return [], None, None
+        return [candidate.model_copy(update={
+            "title": verified.title, "artist": verified.artist, "duration_seconds": verified.duration_seconds,
+        })], None, candidate.id if not complete and not explicit_conflict else None
 
     async def discover(self, recording: RecordingReference) -> DiscoveryBatch:
         fallback = DiscoveryBatch(
@@ -507,29 +519,42 @@ class HitmosProvider(AudioProvider):
                     document.diagnostics.search_elapsed_ms = document.diagnostics.elapsed_ms
                     document.diagnostics.search_extraction_elapsed_ms = round(
                         (time.monotonic() - extraction_started) * 1000)
-                recordings, auto_candidate_id, require_unique, budget_wait = await self._enrich_missing_durations(
-                    recording, recordings, document.diagnostics if isinstance(document, SourceDocument) else None)
-                if cached and cached[1].require_unique_hitmos_match:
-                    auto_candidate_id, require_unique = None, True
                 search_url = fallback.search_url
                 manual_selection = False
+                trial_candidate_id = None
                 hitmos_artist = None
-                try:
-                    alternate = await self._search_by_coartist(recording, recordings) if budget_wait is None else None
-                except SourceFailure as exc:
-                    if exc.reason != "request_budget_exhausted":
-                        raise
-                    budget_wait, alternate = exc.retry_after_seconds, None
-                if alternate is not None:
-                    recordings, complete, alternate_document, query, hitmos_artist = alternate
-                    search_url = "https://ru.hitmox.org/search?" + urlencode({"q": query})
+                if cached and previous.hitmos_artist:
+                    hitmos_artist = previous.hitmos_artist
+                    search_url = previous.search_url
+                    recordings, budget_wait, trial_candidate_id = await self._verify_coartist_candidate(
+                        recording.model_copy(update={"artist": hitmos_artist}), recordings, complete)
                     auto_candidate_id, require_unique = None, False
-                    manual_selection = len(recordings) > 1 or not complete
-                    if (isinstance(document, SourceDocument) and document.diagnostics is not None
-                            and isinstance(alternate_document, SourceDocument) and alternate_document.diagnostics is not None):
-                        document.diagnostics.search_elapsed_ms = sum(
-                            value or 0 for value in (document.diagnostics.search_elapsed_ms,
-                                                     alternate_document.diagnostics.elapsed_ms))
+                else:
+                    recordings, auto_candidate_id, require_unique, budget_wait = await self._enrich_missing_durations(
+                        recording, recordings, document.diagnostics if isinstance(document, SourceDocument) else None)
+                    if cached and previous.require_unique_hitmos_match:
+                        auto_candidate_id, require_unique = None, True
+                    try:
+                        alternate = await self._search_by_coartist(recording, recordings) if budget_wait is None else None
+                    except SourceFailure as exc:
+                        if exc.reason != "request_budget_exhausted":
+                            raise
+                        budget_wait, alternate = exc.retry_after_seconds, None
+                    if alternate is not None:
+                        rows, alternate_complete, alternate_document, query, artist = alternate
+                        rows, budget_wait, trial_candidate_id = await self._verify_coartist_candidate(
+                            recording.model_copy(update={"artist": artist}), rows, alternate_complete)
+                        if rows:
+                            recordings, complete, hitmos_artist = rows, alternate_complete, artist
+                            search_url = "https://ru.hitmox.org/search?" + urlencode({"q": query})
+                            auto_candidate_id, require_unique = None, False
+                            if (isinstance(document, SourceDocument) and document.diagnostics is not None
+                                    and isinstance(alternate_document, SourceDocument) and alternate_document.diagnostics is not None):
+                                document.diagnostics.search_elapsed_ms = sum(
+                                    value or 0 for value in (document.diagnostics.search_elapsed_ms,
+                                                             alternate_document.diagnostics.elapsed_ms))
+                if hitmos_artist:
+                    manual_selection = len(recordings) > 1 or not complete or budget_wait is not None
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
                 result = DiscoveryBatch(source="hitmos", status="error" if budget_wait is not None and not recordings else "ok",
@@ -540,6 +565,7 @@ class HitmosProvider(AudioProvider):
                     complete=complete, auto_candidate_id=auto_candidate_id,
                     require_unique_hitmos_match=require_unique,
                     hitmos_manual_selection=manual_selection,
+                    hitmos_trial_candidate_id=trial_candidate_id,
                     hitmos_artist=hitmos_artist,
                     retry_after_seconds=budget_wait,
                     reused_cache=cached is not None,

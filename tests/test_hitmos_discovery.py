@@ -135,8 +135,107 @@ def test_hitmos_explicit_label_is_confirmed_separately_from_user_choice():
     assert assess_hitmos(ref, "Sonne (Explicit)", "Rammstein", 272).explicit_status == "confirmed"
 
 
+@pytest.mark.parametrize(("deezer_id", "explicit", "reasons"), [
+    ("705273532", True, ["explicit_unconfirmed"]),
+    ("705272682", False, []),
+])
+def test_hitmos_refines_incomplete_coartist_result_after_budget_recovers(deezer_id, explicit, reasons):
+    title = "I Think I'm OKAY"
+    credits = ["Machine Gun Kelly", "YUNGBLUD", "Travis Barker"]
+    page_artist = "Travis Barker, Machine Gun Kelly, YUNGBLUD"
+    ref = RecordingReference(title=title, artist=credits[0], duration_seconds=170, deezer_id=deezer_id,
+                             explicit_lyrics=explicit, allow_unknown_hitmos_explicit=True)
+    now = [0.]
+
+    class CoartistReader(Reader):
+        async def read_search(self, query):
+            self.calls.append(("search", query))
+            rows = {}
+            if query == f"{credits[-1]} {title}":
+                rows = {"64870791": (title, ", ".join(credits), None),
+                        **{str(i): ("Another song", credits[-1], 170) for i in range(1, 6)}}
+            return await Reader(rows).read_search(query)
+
+        async def read_song(self, song_id, *, metadata_only=False):
+            if now[0] == 0:
+                raise SourceFailure("request_budget_exhausted", retry_after_seconds=8)
+            return await super().read_song(song_id, metadata_only=metadata_only)
+
+    async def track_credits(track_id):
+        assert track_id == deezer_id
+        return title, credits[0], 170, credits
+
+    async def run():
+        reader = CoartistReader({"64870791": (title, page_artist, 170)})
+        provider = HitmosProvider(reader, track_credits=track_credits)
+        provider._clock = lambda: now[0]
+        service = SourceSelectionService({"hitmos": provider}, clock=lambda: now[0])
+        denied = await service.discover(ref)
+        assert (denied.reason, denied.retry_after_seconds) == ("request_budget_exhausted", 8)
+        assert [item.id for item in denied.candidates] == ["64870791"]
+        assert denied.hitmos_trial_candidate_id is None
+
+        now[0] = 7
+        waiting = await service.discover(ref)
+        assert waiting.reused_cache and waiting.retry_after_seconds == 1
+        assert len(reader.calls) == 2
+
+        now[0] = 8
+        result = await service.discover(ref)
+        batch = await provider.discover(ref)
+        assert not batch.complete and batch.hitmos_manual_selection
+        assert result.selection == "choose" and result.hitmos_manual_selection and result.selected_id is None
+        assert result.hitmos_trial_candidate_id == "64870791"
+        candidate, = result.candidates
+        assert (candidate.id, candidate.duration_seconds, candidate.artist, candidate.method) == (
+            "64870791", 170, page_artist, "external_link")
+        assert candidate.match.reasons == reasons and candidate.match.explicit_status == "unknown"
+        assert reader.calls == [("search", f"{credits[0]} {title}"), ("search", f"{credits[-1]} {title}"),
+                                ("64870791", True)]
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("page_artist", ["Travis Barker, YUNGBLUD, Another Artist",
+                                        "Machine Gun Kelly, YUNGBLUD, Travis Barker, Another Artist"])
+def test_hitmos_full_credits_must_match_all_artists(page_artist):
+    ref = REF.model_copy(update={"artist": "Machine Gun Kelly, YUNGBLUD, Travis Barker"})
+    assert "artist_unconfirmed" in assess_hitmos(ref, REF.title, page_artist, 272).reasons
+
+
+@pytest.mark.parametrize("competing_search", ["primary", "alternate"])
+def test_incomplete_hitmos_trial_requires_no_competitor_in_either_search(competing_search):
+    title = "I Think I'm OKAY"
+    credits = ["Machine Gun Kelly", "YUNGBLUD", "Travis Barker"]
+    artist = ", ".join(credits)
+
+    class CoartistReader(Reader):
+        async def read_search(self, query):
+            alternate = query == f"{credits[-1]} {title}"
+            rows = {"64870792": (title, artist, 170)} if competing_search == ("alternate" if alternate else "primary") else {}
+            if alternate:
+                rows.update({"64870791": (title, artist, 170),
+                             **{str(i): ("Another song", artist, 170) for i in range(1, 6)}})
+            return await Reader(rows).read_search(query)
+
+    async def track_credits(track_id):
+        return title, credits[0], 170, credits
+
+    async def run():
+        ref = RecordingReference(title=title, artist=credits[0], duration_seconds=170, deezer_id="705273532")
+        reader = CoartistReader({"64870791": (title, artist, 170)})
+        provider = HitmosProvider(reader, track_credits=track_credits)
+        result = await SourceSelectionService({"hitmos": provider}).discover(ref)
+        assert result.hitmos_manual_selection and result.selection == "choose"
+        assert {item.id for item in result.candidates} == {"64870791", "64870792"}
+        assert result.hitmos_trial_candidate_id is None
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(("primary", "alternate", "page_artist", "page_title", "page_duration", "expected", "queries"), [
     ("empty", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 2),
+    ("empty", "alias", "Fred Durst, Machine Gun Kelly", "FIX UR FACE", 199, "automatic", 2),
     ("wrong", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 2),
     ("exact", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 1),
     ("empty", "alias", "Another Artist, Fred Durst", "FIX UR FACE", 199, "none", 2),
@@ -177,7 +276,7 @@ def test_hitmos_coartist_fallback(primary, alternate, page_artist, page_title, p
         detail_calls = [call for call in reader.calls if call[0] != "search"]
         assert len(detail_calls) == int(queries == 2 and alternate == "alias")
         if expected == "automatic" and queries == 2:
-            assert result.candidates[0].artist == full_artist
+            assert result.candidates[0].artist == page_artist
             assert result.candidates[0].duration_seconds == 199
             assert (await provider.prepare(ref, "82065078")).reused_cache
         before = list(reader.calls)
@@ -789,6 +888,9 @@ def test_discovery_and_play_use_one_validated_api(app, monkeypatch):
                   "explicit_lyrics": False}
         result = client.get("/api/audio/resolve", params=params)
         assert result.status_code == 200 and result.json()["selected_id"] == "1"
+        trial = client.get("/api/audio/resolve", params={**params, "hitmos_id": "1", "hitmos_trial": True})
+        assert trial.status_code == 200 and trial.json()["status"] == "available"
+        assert not app.state.source_selection._matches
         result = client.get("/api/audio/resolve", params={**params, "hitmos_id": "1"})
         assert result.status_code == 200 and result.json()["status"] == "available"
         assert client.get("/api/audio/resolve", params={**params, "url": "http://localhost"}).status_code == 422

@@ -3,14 +3,15 @@
 from difflib import SequenceMatcher
 
 from musicstream.audio_providers.base import AudioCandidate, DiscoveryBatch, RecordingReference, SourceResult
-from musicstream.audio_providers.matching import assess, assess_hitmos, normalize
+from musicstream.audio_providers.matching import assess, assess_hitmos, normalize, same_hitmos_artists
 
 
 def exact_metadata(recording: RecordingReference, candidate: AudioCandidate) -> bool:
     return (candidate.match.status == "likely" and recording.duration_seconds is not None
             and recording.duration_seconds > 0
             and normalize(candidate.title) == normalize(recording.title)
-            and normalize(candidate.artist or "") == normalize(recording.artist))
+            and (same_hitmos_artists(recording.artist, candidate.artist) if candidate.source == "hitmos"
+                 else normalize(candidate.artist or "") == normalize(recording.artist)))
 
 
 def hitmos_missing_duration_match(recording: RecordingReference, candidate: AudioCandidate) -> bool:
@@ -19,7 +20,7 @@ def hitmos_missing_duration_match(recording: RecordingReference, candidate: Audi
             and candidate.duration_seconds is None
             and candidate.match.reasons == ["duration_unknown"]
             and normalize(candidate.title) == normalize(recording.title)
-            and normalize(candidate.artist or "") == normalize(recording.artist))
+            and same_hitmos_artists(recording.artist, candidate.artist))
 
 
 def hitmos_unknown_explicit_match(recording: RecordingReference, candidate: AudioCandidate) -> bool:
@@ -31,7 +32,7 @@ def hitmos_unknown_explicit_match(recording: RecordingReference, candidate: Audi
             and recording.duration_seconds is not None and recording.duration_seconds > 0
             and candidate.duration_seconds is not None and candidate.duration_seconds > 0
             and normalize(candidate.title) == normalize(recording.title)
-            and normalize(candidate.artist or "") == normalize(recording.artist))
+            and same_hitmos_artists(recording.artist, candidate.artist))
 
 
 def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceResult:
@@ -42,7 +43,8 @@ def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceRe
     for item in batch.recordings:
         match = assess_candidate(recording, item.title, item.artist, item.duration_seconds)
         title = SequenceMatcher(None, normalize(recording.title), normalize(item.title)).ratio()
-        artist = SequenceMatcher(None, normalize(recording.artist), normalize(item.artist or "")).ratio()
+        artist = (1.0 if batch.source == "hitmos" and same_hitmos_artists(recording.artist, item.artist)
+                  else SequenceMatcher(None, normalize(recording.artist), normalize(item.artist or "")).ratio())
         duration = 0.0
         if item.duration_seconds is not None and recording.duration_seconds is not None:
             tolerance = max(5, recording.duration_seconds * .03)

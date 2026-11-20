@@ -124,6 +124,7 @@ class DiscoveryBatch(BaseModel):
     auto_candidate_id: str | None = Field(default=None, pattern=r"^[0-9]{1,12}$")
     require_unique_hitmos_match: bool = False
     hitmos_manual_selection: bool = False
+    hitmos_trial_candidate_id: str | None = None
     hitmos_artist: str | None = None
     diagnostics: ResolutionDiagnostics | None = None
     reused_cache: bool = False
@@ -151,6 +152,8 @@ class SourceResult(BaseModel):
     selection: Literal["none", "automatic", "choose"] = "none"
     selected_id: str | None = None
     selected_source: Literal["youtube", "hitmos"] | None = None
+    hitmos_manual_selection: bool = False
+    hitmos_trial_candidate_id: str | None = None
     sources: list[ProviderSummary] = Field(default_factory=list)
     reused_match: bool = False
     reused_cache: bool = False

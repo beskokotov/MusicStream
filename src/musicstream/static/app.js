@@ -1150,7 +1150,7 @@ const musicPlayer = (() => {
   if (typeof window.MusicStreamDashPlaybackAdapter !== "function") dashLoadButton.hidden = true;
   const diagnosticPanel = document.querySelector("#source-diagnostics");
   let diagnosticsEnabled = false;
-  const stageLabels = { source_search: "поиск источника", source_metadata: "метаданные источника", matching: "сопоставление записей", stream_resolution: "получение адреса", cdn_response: "загрузка CDN", browser_playback: "воспроизведение браузером" };
+  const stageLabels = { source_search: "поиск источника", source_metadata: "метаданные источника", matching: "сопоставление записей", stream_resolution: "получение адреса", redirect: "проверка перенаправления", proxy_connect: "подключение прокси", http_range: "проверка диапазона аудио", cdn_response: "загрузка CDN", browser_playback: "воспроизведение браузером" };
   const sourceDiagnosticFields = [
     "elapsed_ms", "browser_launch_elapsed_ms", "browser_context_create_elapsed_ms",
     "browser_page_create_elapsed_ms", "domcontentloaded_elapsed_ms", "document_body_elapsed_ms",
@@ -1322,6 +1322,13 @@ const musicPlayer = (() => {
         ready_state: audio.readyState, network_state: audio.networkState });
     }
     section.setAttribute("aria-busy", "false");
+  }
+
+  function failHitmos(stage, reason) {
+    const code = /^[a-z][a-z0-9_]{0,79}$/.test(reason || "") ? reason : null;
+    document.querySelector("#developer-mode").open = true;
+    fail(code ? `Hitmos: ${code}.` : "Не удалось запустить Hitmos.",
+      Object.hasOwn(stageLabels, stage) ? stage : null, code);
   }
 
   function loadAPI() {
@@ -1626,18 +1633,26 @@ const musicPlayer = (() => {
   const normalizeHitmosMetadata = value => (value || "").normalize("NFKD").toLowerCase()
     .replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
 
+  function sameHitmosArtists(reference, candidate) {
+    const credits = value => (value || "").split(",").map(normalizeHitmosMetadata).sort();
+    const expected = credits(reference);
+    const actual = credits(candidate);
+    return expected.length === actual.length && expected.every((credit, index) => credit && credit === actual[index]);
+  }
+
   function hitmosReferenceArtist(track, artist) {
     if (typeof artist !== "string" || artist.length > 200) return track.artist;
     const primary = normalizeHitmosMetadata(track.artist);
-    return artist.split(",").some(credit => normalizeHitmosMetadata(credit) === primary) ? artist : track.artist;
+    return sameHitmosArtists(track.artist, artist) || artist.split(",").some(credit => normalizeHitmosMetadata(credit) === primary)
+      ? artist : track.artist;
   }
 
   function hasExactHitmosNames(track, comparison) {
     const title = normalizeHitmosMetadata(track.title);
-    const artist = normalizeHitmosMetadata(hitmosReferenceArtist(track, comparison?.reference_artist));
-    return Boolean(title && artist && comparison
+    const artist = hitmosReferenceArtist(track, comparison?.reference_artist);
+    return Boolean(title && comparison
       && title === normalizeHitmosMetadata(comparison.candidate_title)
-      && artist === normalizeHitmosMetadata(comparison.candidate_artist));
+      && sameHitmosArtists(artist, comparison.candidate_artist));
   }
 
   function isUnknownHitmosExplicit(item) {
@@ -1659,14 +1674,23 @@ const musicPlayer = (() => {
       && hasExactHitmosNames(track, match.comparison));
   }
 
-  function suitableHitmosDurationDifference(track, item) {
+  function suitableHitmosDurationDifference(track, item, allowUnknownExplicit = false) {
     const match = item.match;
     const candidateDuration = match?.comparison?.candidate_duration_seconds;
-    if (match?.status !== "likely" || match.explicit_status === "conflicting"
+    if (!(match?.status === "likely" || (allowUnknownExplicit && isUnknownHitmosExplicit(item)))
+        || match.explicit_status === "conflicting"
         || !hasExactHitmosNames(track, match.comparison)
         || !(track.duration_seconds > 0) || !(candidateDuration > 0)) return Infinity;
     const difference = Math.abs(candidateDuration - track.duration_seconds);
     return difference <= Math.max(5, track.duration_seconds * .03) ? difference : Infinity;
+  }
+
+  function canTryIncompleteHitmosCandidate(track, item) {
+    const match = item.match;
+    const allowUnknown = unknownHitmosExplicit.checked;
+    return (match?.explicit_status === "confirmed" || (allowUnknown && match?.explicit_status === "unknown"))
+      && (match.reasons?.length === 0 || (allowUnknown && isUnknownHitmosExplicit(item)))
+      && Number.isFinite(suitableHitmosDurationDifference(track, item, allowUnknown));
   }
 
   function verifiedHitmosMatch(track, item, userConfirmed = false) {
@@ -1704,13 +1728,14 @@ const musicPlayer = (() => {
     return null;
   }
 
-  function playHitmos(item, automatic = false, userConfirmed = false) {
+  function playHitmos(item, automatic = false, userConfirmed = false, rememberMatch = true) {
     if (!validHitmosStream(item.stream_url, item.id)) { fail("Адрес аудио не прошёл проверку браузерного адаптера.", "stream_resolution", "client_url_rejected"); return; }
     if (!automatic) stop();
     activeKind = "hitmos";
     setTilePlaybackState(selected?.id, "loading");
     const current = generation;
-    playingHitmosMatch = { current, track: selected, match: verifiedHitmosMatch(selected, item, userConfirmed) };
+    playingHitmosMatch = rememberMatch
+      ? { current, track: selected, match: verifiedHitmosMatch(selected, item, userConfirmed) } : null;
     document.querySelector("#player-title").textContent = item.title || "Запись Hitmos";
     document.querySelector("#player-artist").textContent = item.artist || "Исполнитель неизвестен";
     document.querySelector("#player-duration").textContent = "—:—";
@@ -1839,7 +1864,7 @@ const musicPlayer = (() => {
       hitmos_resolve_ms: null, hitmos_stream_preparation_ms: null,
       hitmos_first_audio_response_ms: null, fallback_reason: null,
       hitmos_saved_match: failedHitmosId ? "fallback_search" : "miss" };
-    const fallback = (reason, discovery = null) => {
+    const fallback = (reason, discovery = null, failure = null) => {
       if (current !== generation || !automaticHitmos) return;
       timing.fallback_reason = reason;
       console.info("MusicStream Auto timing", {
@@ -1850,8 +1875,7 @@ const musicPlayer = (() => {
       else {
         automaticHitmos = null;
         if (discovery) presentSourceOptions(discovery);
-        else fail("Hitmos stream not confirmed; Prowlarr Auto Play is disabled on this server.",
-          "stream_resolution", reason);
+        else failHitmos(failure?.stage, failure?.reason || reason);
       }
     };
     // Auto Play can carry a verified-equivalent Hitmos group so the browser can
@@ -1919,7 +1943,7 @@ const musicPlayer = (() => {
       const search = await fetchHitmos(`/api/audio/resolve?${params}`, HITMOS_DISCOVERY_TIMEOUT_MS, "hitmos_search_timeout");
       timing.hitmos_search_ms = Math.round(performance.now() - searchStarted);
       if (current !== generation) return;
-      if (!search.ok) return fallback(`hitmos_search_http_${search.status}`);
+      if (!search.ok) return fallback(`hitmos_search_http_${search.status}`, null, { stage: "source_search" });
       const discovered = await search.json();
       if (current !== generation) return;
       if (discovered.reason === "request_budget_exhausted") return showHitmosBudget(discovered);
@@ -1935,13 +1959,18 @@ const musicPlayer = (() => {
       const discoveredItems = Array.isArray(discovered.candidates) ? discovered.candidates : [];
       const selectedItem = discoveredItems.find(item => item.source === "hitmos" && item.id === discovered.selected_id);
       const allowUnknownExplicit = Boolean(selectedItem && isUnknownHitmosExplicit(selectedItem));
-      const rankedCandidates = tryMatchingCandidates ? discoveredItems
+      const trialOptions = tryMatchingCandidates && discovered.hitmos_manual_selection && discovered.hitmos_trial_candidate_id
+        ? discoveredItems.filter(item => item.source === "hitmos" && /^[0-9]{1,12}$/.test(item.id)
+          && canTryIncompleteHitmosCandidate(track, item)) : [];
+      const trialCandidate = trialOptions.length === 1 && trialOptions[0].id === discovered.hitmos_trial_candidate_id
+        && trialOptions[0].id !== failedHitmosId ? trialOptions[0] : null;
+      const rankedCandidates = tryMatchingCandidates && !discovered.hitmos_manual_selection ? discoveredItems
         .filter(item => item.source === "hitmos" && item.id !== failedHitmosId && /^[0-9]{1,12}$/.test(item.id))
         .map(item => ({ item, difference: suitableHitmosDurationDifference(track, item) }))
         .filter(({ difference }) => Number.isFinite(difference))
         .sort((left, right) => left.difference - right.difference)
         .map(({ item }) => item) : [];
-      const candidates = (rankedCandidates.length ? rankedCandidates
+      const candidates = (trialCandidate ? [trialCandidate] : rankedCandidates.length ? rankedCandidates
         : discovered.selection === "automatic" && discovered.selected_source === "hitmos"
         ? discoveredItems.filter(item => item.source === "hitmos"
           && item.id !== failedHitmosId
@@ -1968,12 +1997,12 @@ const musicPlayer = (() => {
       let selectedPreparedDiagnostics = null;
       let selectedPreparationReusedCache = false;
       let currentCandidateId = null;
-      let lastReason = "hitmos_stream_unavailable";
       const candidateFailures = [];
       const resolveCandidate = async candidate => {
         const resolveParams = new URLSearchParams({ title: track.title,
           artist: hitmosReferenceArtist(track, candidate.match?.comparison?.reference_artist),
           provider: "hitmos", hitmos_id: candidate.id });
+        if (trialCandidate) resolveParams.set("hitmos_trial", "true");
         if (/^[0-9]{1,20}$/.test(String(track.id))) resolveParams.set("deezer_id", String(track.id));
         if (typeof track.duration_seconds === "number") resolveParams.set("duration_seconds", String(track.duration_seconds));
         if (typeof track.explicit_lyrics === "boolean") resolveParams.set("explicit_lyrics", String(track.explicit_lyrics));
@@ -1981,7 +2010,7 @@ const musicPlayer = (() => {
         const resolved = await fetchHitmos(`/api/audio/resolve?${resolveParams}`, HITMOS_LOOKUP_TIMEOUT_MS, "hitmos_resolve_timeout");
         timing.hitmos_resolve_ms = (timing.hitmos_resolve_ms || 0) + Math.round(performance.now() - resolveStarted);
         if (current !== generation) return { stale: true };
-        if (!resolved.ok) return { reason: `hitmos_stream_http_${resolved.status}` };
+        if (!resolved.ok) return { reason: `hitmos_stream_http_${resolved.status}`, stage: "stream_resolution" };
         const prepared = await resolved.json();
         if (current !== generation) return { stale: true };
         if (prepared.reason === "request_budget_exhausted") return { budget: prepared };
@@ -1990,15 +2019,23 @@ const musicPlayer = (() => {
           timing.hitmos_stream_preparation_ms = (timing.hitmos_stream_preparation_ms || 0)
             + prepared.diagnostics.elapsed_ms;
         }
-        const playable = (prepared.candidates || []).find(item => item.id === candidate.id
-          && (rankedCandidates.length ? Number.isFinite(suitableHitmosDurationDifference(track, item))
-            : canAutoPrepareHitmos(track, item, allowUnknownExplicit))
-          && item.method === "html_audio"
-          && validHitmosStream(item.stream_url, item.id));
-        return prepared.status === "available" && playable
-          ? { stream: playable, diagnostics: prepared.diagnostics || null, reusedCache: candidateReusedCache }
-          : { reason: prepared.reason || "hitmos_stream_unavailable" };
+        if (prepared.status !== "available") {
+          return { reason: prepared.diagnostics?.internal_code || prepared.reason || "hitmos_stream_unavailable",
+            stage: prepared.diagnostics?.stage || prepared.stage || "stream_resolution" };
+        }
+        const matched = (prepared.candidates || []).find(item => item.id === candidate.id
+          && (trialCandidate ? canTryIncompleteHitmosCandidate(track, item)
+            : rankedCandidates.length ? Number.isFinite(suitableHitmosDurationDifference(track, item))
+            : canAutoPrepareHitmos(track, item, allowUnknownExplicit)));
+        if (!matched) return { reason: "hitmos_candidate_rejected", stage: "matching" };
+        if (matched.method !== "html_audio" || !validHitmosStream(matched.stream_url, matched.id))
+          return { reason: "client_url_rejected", stage: "stream_resolution" };
+        return { stream: matched, diagnostics: prepared.diagnostics || null, reusedCache: candidateReusedCache };
       };
+      const resolveFailure = error => ({
+        reason: error.message === "hitmos_resolve_timeout" ? error.message : "hitmos_resolve_failed",
+        stage: "stream_resolution",
+      });
       let nextCandidateIndex = 0;
       for (let index = 0; index < candidates.length; index += 1) {
         const candidate = candidates[index];
@@ -2007,8 +2044,7 @@ const musicPlayer = (() => {
           resolved = await resolveCandidate(candidate);
         } catch (error) {
           if (current !== generation || !automaticHitmos || error.name === "AbortError") return;
-          lastReason = error.message === "hitmos_resolve_timeout" ? error.message : "hitmos_resolve_failed";
-          candidateFailures.push({ id: candidate.id, reason: lastReason });
+          candidateFailures.push({ id: candidate.id, ...resolveFailure(error) });
           continue;
         }
         if (resolved.stale) return;
@@ -2021,14 +2057,13 @@ const musicPlayer = (() => {
           nextCandidateIndex = index + 1;
           break;
         }
-        lastReason = resolved.reason || lastReason;
-        candidateFailures.push({ id: candidate.id, reason: lastReason });
+        candidateFailures.push({ id: candidate.id, reason: resolved.reason, stage: resolved.stage });
       }
       if (!stream) {
         console.info("MusicStream Hitmos candidates exhausted", {
           deezer_id: String(track.id), candidate_failures: candidateFailures,
         });
-        return fallback(candidateFailures.length ? "hitmos_candidates_unavailable" : lastReason);
+        return fallback("hitmos_candidates_unavailable", null, candidateFailures.at(-1));
       }
 
       const preparedDiagnostics = selectedPreparationReusedCache ? null : selectedPreparedDiagnostics;
@@ -2053,7 +2088,7 @@ const musicPlayer = (() => {
         audio_stream_network: "required for playback",
       });
 
-      if (!isUnknownHitmosExplicit(stream)) {
+      if (!trialCandidate && !isUnknownHitmosExplicit(stream)) {
         hitmosPlaybackCache.set(String(track.id), {
           item: { ...stream, title: track.title, artist: track.artist },
           expiresAt: Date.now() + 45_000,
@@ -2065,7 +2100,7 @@ const musicPlayer = (() => {
       context.tryNextCandidate = async reason => {
         if (current !== generation || automaticHitmos !== context || context.retryInProgress) return true;
         context.retryInProgress = true;
-        if (currentCandidateId) candidateFailures.push({ id: currentCandidateId, reason });
+        if (currentCandidateId) candidateFailures.push({ id: currentCandidateId, reason, stage: "browser_playback" });
         if (context.timer) clearTimeout(context.timer);
         hitmosPlaybackCache.delete(String(track.id));
         audio.pause();
@@ -2081,8 +2116,7 @@ const musicPlayer = (() => {
             resolved = await resolveCandidate(candidate);
           } catch (error) {
             if (current !== generation || automaticHitmos !== context) return true;
-            lastReason = error.message === "hitmos_resolve_timeout" ? error.message : "hitmos_resolve_failed";
-            candidateFailures.push({ id: candidate.id, reason: lastReason });
+            candidateFailures.push({ id: candidate.id, ...resolveFailure(error) });
             continue;
           }
           if (resolved.stale || current !== generation || automaticHitmos !== context) return true;
@@ -2092,8 +2126,7 @@ const musicPlayer = (() => {
           }
           nextCandidateIndex = index + 1;
           if (!resolved.stream) {
-            lastReason = resolved.reason || "hitmos_stream_unavailable";
-            candidateFailures.push({ id: candidate.id, reason: lastReason });
+            candidateFailures.push({ id: candidate.id, reason: resolved.reason, stage: resolved.stage });
             continue;
           }
           const nextStream = resolved.stream;
@@ -2119,7 +2152,7 @@ const musicPlayer = (() => {
         console.info("MusicStream Hitmos candidates exhausted", {
           deezer_id: String(track.id), candidate_failures: candidateFailures,
         });
-        fallback(reason || lastReason || "hitmos_candidates_unavailable");
+        fallback(reason || "hitmos_candidates_unavailable", null, candidateFailures.at(-1));
         return true;
       };
       automaticHitmos.phase = "audio_response";
@@ -2131,11 +2164,12 @@ const musicPlayer = (() => {
       console.info("MusicStream Auto timing", {
         ...timing, chosen: "hitmos_pending_audio", hitmos_url_resolved_ms: Math.round(performance.now() - startedAt),
       });
-      playHitmos(stream, true);
+      playHitmos(stream, true, false, !trialCandidate);
     } catch (error) {
       if (current !== generation || error.name === "AbortError") return;
       fallback(["hitmos_search_timeout", "hitmos_resolve_timeout"].includes(error.message)
-        ? error.message : "hitmos_request_failed");
+        ? error.message : "hitmos_request_failed", null,
+      { stage: automaticHitmos?.phase === "search" ? "source_search" : automaticHitmos?.phase });
     }
   }
 
@@ -2175,8 +2209,7 @@ const musicPlayer = (() => {
         play_to_fallback_ms: Math.round(performance.now() - context.startedAt),
       });
       if (torrentAutoAvailable) prepareTorrent(reason, context.startedAt);
-      else fail("Hitmos не подтвердил аудиопоток; резервный Auto Play Prowlarr не включён на сервере.",
-        "browser_playback", reason);
+      else failHitmos("browser_playback", reason);
       return;
     }
     if (errorName === "NotAllowedError") {

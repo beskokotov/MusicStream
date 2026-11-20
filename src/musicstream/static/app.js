@@ -1110,6 +1110,32 @@ const musicPlayer = (() => {
   const hitmosForm = document.querySelector("#hitmos-manual-form");
   const hitmosLink = document.querySelector("#hitmos-song-link");
   const audio = document.querySelector("#hitmos-audio");
+  const playbackTestButton = document.querySelector("#playback-test-button");
+  const dashLoadButton = document.querySelector("#dash-audio-load");
+  const dashAdapter = typeof window.MusicStreamDashPlaybackAdapter === "function"
+    ? new window.MusicStreamDashPlaybackAdapter(audio, (state, errorCode = null) => {
+    if (activeKind !== "dash") return;
+    if (state === "ready") {
+      audio.hidden = false;
+      controls(true);
+      playbackState.textContent = "Ready · DASH audio";
+      message.textContent = "The DASH manifest and AAC audio track are ready. Use the shared player controls to play, pause, seek, and change volume.";
+      section.setAttribute("aria-busy", "false");
+      updateProgress();
+    } else if (state === "buffering") {
+      playbackState.textContent = "Buffering · DASH";
+      message.textContent = "The DASH player is requesting and appending media segments.";
+      section.setAttribute("aria-busy", "true");
+    } else if (state === "request_blocked") {
+      fail("A manifest or segment URL was outside this source provider’s allowed origins.");
+    } else if (state === "error") {
+      const detail = Number.isInteger(errorCode) ? ` (dash.js code ${errorCode})` : "";
+      fail(`DASH manifest or media segment playback failed${detail}. Reload the public sample to retry.`);
+    }
+    })
+    : { destroy: async () => {}, seek: () => false, recover: () => false,
+        prepare: async () => { throw new Error("dash_library_unavailable"); } };
+  if (typeof window.MusicStreamDashPlaybackAdapter !== "function") dashLoadButton.hidden = true;
   const diagnosticPanel = document.querySelector("#source-diagnostics");
   let diagnosticsEnabled = false;
   const stageLabels = { source_search: "поиск источника", source_metadata: "метаданные источника", matching: "сопоставление записей", stream_resolution: "получение адреса", cdn_response: "загрузка CDN", browser_playback: "воспроизведение браузером" };
@@ -1165,6 +1191,7 @@ const musicPlayer = (() => {
     output.textContent = diagnosticsEnabled ? JSON.stringify(safe, null, 2) : "";
   }
   let activeKind = null;
+  let playbackTestActive = false;
   let preparedSource = null;
   let selected, player, request, polling, apiPromise, frameTimer;
   let generation = 0;
@@ -1203,7 +1230,7 @@ const musicPlayer = (() => {
     volume.disabled = !enabled;
     seek.disabled = true;
     play.textContent = "▶";
-    play.setAttribute("aria-label", activeKind === "torrent" ? "Воспроизвести аудио" : activeKind === "hitmos" ? "Воспроизвести аудио Hitmos" : "Воспроизвести видео YouTube");
+    play.setAttribute("aria-label", activeKind === "dash" ? "Play DASH audio" : activeKind === "torrent" ? "Play audio" : activeKind === "hitmos" ? "Play Hitmos audio" : "Play YouTube video");
   }
 
   function stop() {
@@ -1228,6 +1255,8 @@ const musicPlayer = (() => {
     }
     preparedSource = null;
     activeKind = null;
+    playbackTestActive = false;
+    void dashAdapter.destroy();
     audio.pause();
     audio.removeAttribute("src");
     audio.load();
@@ -1260,7 +1289,8 @@ const musicPlayer = (() => {
       fetch(`/api/experimental/playback/prepare/${encodeURIComponent(cancelled)}`, { method: "DELETE" }).catch(() => {});
     }
     if (activeKind === "torrent") releaseTorrentPlayback();
-    if (activeKind === "hitmos" || activeKind === "torrent") audio.pause();
+    if (["hitmos", "torrent", "dash"].includes(activeKind)) audio.pause();
+    if (activeKind === "dash") void dashAdapter.destroy();
     clearInterval(polling);
     clearTimeout(frameTimer);
     playbackState.textContent = "Недоступно";
@@ -1330,7 +1360,7 @@ const musicPlayer = (() => {
   }
 
   function updateProgress() {
-    const usesAudio = ["hitmos", "torrent"].includes(activeKind);
+    const usesAudio = ["hitmos", "torrent", "dash"].includes(activeKind);
     if (!ready || (!usesAudio && !player?.getCurrentTime)) {
       clearProgressVisuals();
       return;
@@ -1350,7 +1380,9 @@ const musicPlayer = (() => {
     seek.max = String(total);
     if (!seekDragging) seek.value = String(position);
     if (usesAudio) {
-      seek.disabled = audio.seekable.length === 0
+      seek.disabled = activeKind === "dash"
+        ? !Number.isFinite(audio.duration) || audio.duration <= 0
+        : audio.seekable.length === 0
         || audio.seekable.end(audio.seekable.length - 1) <= audio.seekable.start(0);
       updateBufferedVisual(total);
     } else {
@@ -1465,8 +1497,27 @@ const musicPlayer = (() => {
   }
 
   function audioWaiting() {
-    if (!["hitmos", "torrent"].includes(activeKind) || (audio.paused && audio.readyState >= 1)) return;
+    if (!["hitmos", "torrent", "dash"].includes(activeKind) || (audio.paused && audio.readyState >= 1)) return;
     setTilePlaybackState(selected?.id, "loading");
+    if (playbackTestActive) {
+      playbackState.textContent = "Loading local test MP3";
+      message.textContent = "Synthetic test audio only.";
+      section.setAttribute("aria-busy", "true");
+      return;
+    }
+    if (activeKind === "dash") {
+      playbackState.textContent = "Buffering · DASH";
+      message.textContent = "Waiting for DASH media segments; the DASH client is retrying segment delivery.";
+      section.setAttribute("aria-busy", "true");
+      clearTimeout(frameTimer);
+      frameTimer = setTimeout(() => {
+        if (activeKind === "dash" && !audio.paused && audio.readyState < 3 && dashAdapter.recover()) {
+          playbackState.textContent = "Recovering · DASH";
+          message.textContent = "Re-requested media at the current position after a prolonged buffer stall.";
+        }
+      }, 12000);
+      return;
+    }
     if (activeKind === "torrent") {
       playbackState.textContent = "Буферизация…";
       section.setAttribute("aria-busy", "true");
@@ -1580,6 +1631,71 @@ const musicPlayer = (() => {
     audio.play().catch(error => {
       if (current === generation && activeKind === "hitmos") audioFailure(error.name);
     });
+  }
+
+  async function playPlaybackTest() {
+    stop();
+    const current = generation;
+    playbackState.textContent = "Preparing local test MP3";
+    try {
+      const response = await fetch("/api/audio/playback-test/prepare", { cache: "no-store" });
+      if (!response.ok) throw new Error("test_source_unavailable");
+      const result = await response.json();
+      if (current !== generation || !/^\/api\/audio\/playback-test\/[A-Za-z0-9_-]{20,64}$/.test(result.playback_url || "")) return;
+      playbackTestActive = true;
+      activeKind = "hitmos";
+      section.hidden = false;
+      document.querySelector("#player-title").textContent = "Synthetic 440 Hz test tone";
+      document.querySelector("#player-artist").textContent = "Local MP3 transport test";
+      document.querySelector("#player-duration").textContent = "—:—";
+      audio.hidden = false;
+      audio.volume = Number(volume.value) / 100;
+      audio.src = result.playback_url;
+      audioWaiting();
+      audio.play().catch(error => {
+        if (current === generation && playbackTestActive) audioFailure(error.name);
+      });
+    } catch {
+      playbackState.textContent = "Test MP3 unavailable";
+      message.textContent = "Enable MUSICSTREAM_AUDIO_TRANSPORT_TEST=true and restart MusicStream.";
+    }
+  }
+
+  async function playDashSample() {
+    stop();
+    const current = generation;
+    activeKind = "dash";
+    dashLoadButton.disabled = true;
+    section.hidden = false;
+    audio.hidden = false;
+    audio.volume = Number(volume.value) / 100;
+    document.querySelector("#player-title").textContent = "BBC R&D · AAC-LC radio sample";
+    document.querySelector("#player-artist").textContent = "Open DASH audio · shared MusicStream player";
+    document.querySelector("#player-duration").textContent = "—:—";
+    document.querySelector("#player-cover").querySelectorAll("img").forEach(image => image.remove());
+    playbackState.textContent = "Loading DASH manifest";
+    message.textContent = "Checking the open manifest, AAC codec, and allowed segment origins.";
+    section.setAttribute("aria-busy", "true");
+    try {
+      await dashAdapter.prepare(new window.MusicStreamOpenBbcDashAudioSource());
+    } catch (error) {
+      if (current !== generation) return;
+      const reason = error instanceof TypeError ? "dash_network_or_cors" : String(error?.message || "dash_source_unavailable");
+      const messageByReason = {
+        dash_library_unavailable: "Could not load dash.js from the pinned DASH-IF CDN.",
+        dash_network_or_cors: "The browser could not fetch the public manifest. Check external network access and the source CORS policy.",
+        dash_manifest_origin_not_allowed: "The source provider returned a manifest outside its declared HTTPS origins.",
+        dash_manifest_redirect_not_allowed: "The manifest redirected outside the source provider’s allowed origins.",
+        dash_drm_content_rejected: "This adapter accepts clear DASH only; the manifest declares ContentProtection.",
+        dash_audio_aac_unsupported: "The manifest has no audio/mp4 AAC representation supported by this adapter.",
+        dash_video_representation_unsupported: "This audio-only adapter refuses manifests that also contain video.",
+        dash_mse_aac_unsupported: "This browser does not support AAC audio/mp4 through MediaSource.",
+      };
+      fail(messageByReason[reason] || "The DASH manifest or audio source could not be prepared.", "stream_resolution", reason);
+      playbackState.textContent = "DASH source unavailable";
+    } finally {
+      if (current === generation) dashLoadButton.disabled = false;
+    }
   }
 
   async function prepareAutomaticPlayback() {
@@ -1962,12 +2078,12 @@ const musicPlayer = (() => {
   }
 
   audio.addEventListener("loadedmetadata", () => {
-    if (!["hitmos", "torrent"].includes(activeKind)) return;
+    if (!["hitmos", "torrent", "dash"].includes(activeKind)) return;
     controls(true);
     updateProgress();
   });
   audio.addEventListener("playing", () => {
-    if (!["hitmos", "torrent"].includes(activeKind) || audio.paused || audio.ended) return;
+    if (!["hitmos", "torrent", "dash"].includes(activeKind) || audio.paused || audio.ended) return;
     setTilePlaybackState(selected?.id, "playing");
     if (activeKind === "torrent") {
       logTorrentMilestone("browser_playing");
@@ -1984,7 +2100,29 @@ const musicPlayer = (() => {
       updateProgress();
       return;
     }
+    if (activeKind === "dash") {
+      clearTimeout(frameTimer);
+      controls(true);
+      play.textContent = "❚❚";
+      play.setAttribute("aria-label", "Pause DASH audio");
+      playbackState.textContent = "Playing · DASH";
+      message.textContent = "Real audio is playing through the shared HTMLAudioElement and MediaSource.";
+      section.setAttribute("aria-busy", "false");
+      setTilePlaybackState(selected?.id, "playing");
+      updateProgress();
+      return;
+    }
     clearTimeout(frameTimer);
+    if (playbackTestActive) {
+      controls(true);
+      play.textContent = "\u275a\u275a";
+      play.setAttribute("aria-label", "Pause local test MP3");
+      playbackState.textContent = "Playing local test MP3";
+      message.textContent = "Shared MusicStream audio element is playing a local synthetic MP3 test.";
+      section.setAttribute("aria-busy", "false");
+      updateProgress();
+      return;
+    }
     if (automaticHitmos && automaticHitmos.current === generation) {
       console.info("MusicStream Auto timing", {
         ...(automaticHitmos.timing || {}), chosen: "hitmos",
@@ -2006,7 +2144,7 @@ const musicPlayer = (() => {
     automaticHitmos.timing.hitmos_first_audio_response_ms = Math.round(performance.now() - automaticHitmos.startedAt);
   });
   audio.addEventListener("pause", () => {
-    if (!["hitmos", "torrent"].includes(activeKind) || !ready) return;
+    if (!["hitmos", "torrent", "dash"].includes(activeKind) || !ready) return;
     if (selected?.id != null && trackPlaybackStates.get(String(selected.id)) === "error") return;
     setTilePlaybackState(selected?.id, automaticHitmos ? "loading" : "paused");
     if (activeKind === "torrent") {
@@ -2018,7 +2156,23 @@ const musicPlayer = (() => {
       section.setAttribute("aria-busy", "false");
       return;
     }
+    if (activeKind === "dash") {
+      clearTimeout(frameTimer);
+      play.textContent = "▶";
+      play.setAttribute("aria-label", "Play DASH audio");
+      playbackState.textContent = "Paused · DASH";
+      message.textContent = "Paused in the shared HTMLAudioElement.";
+      section.setAttribute("aria-busy", "false");
+      setTilePlaybackState(selected?.id, "paused");
+      return;
+    }
     clearTimeout(frameTimer);
+    if (playbackTestActive) {
+      play.textContent = "в–¶";
+      playbackState.textContent = "Paused · local test MP3";
+      section.setAttribute("aria-busy", "false");
+      return;
+    }
     play.textContent = "▶";
     play.setAttribute("aria-label", "Воспроизвести аудио Hitmos");
     playbackState.textContent = audio.ended ? "Завершено · Hitmos" : "Пауза · Hitmos";
@@ -2053,6 +2207,13 @@ const musicPlayer = (() => {
       play.textContent = "▶";
       play.setAttribute("aria-label", "Воспроизвести аудио Hitmos");
     }
+
+    if (activeKind === "dash") {
+      playbackState.textContent = "Finished (DASH)";
+      setTilePlaybackState(selected?.id, "idle");
+      play.textContent = "Play";
+      play.setAttribute("aria-label", "Play DASH audio");
+    }
   });
   audio.addEventListener("progress", updateProgress);
   audio.addEventListener("waiting", audioWaiting);
@@ -2066,6 +2227,8 @@ const musicPlayer = (() => {
   audio.addEventListener("error", () => {
     if (["hitmos", "torrent"].includes(activeKind) && audio.error) audioFailure();
   });
+  playbackTestButton.addEventListener("click", playPlaybackTest);
+  dashLoadButton.addEventListener("click", playDashSample);
 
   function showCandidates(items, sourceName) {
     candidates.replaceChildren();
@@ -2082,7 +2245,7 @@ const musicPlayer = (() => {
       const matchText = { likely: "Вероятное совпадение", uncertain: "Совпадение не подтверждено", mismatch: "Другая запись или версия" };
       detail.textContent = `${isHitmos ? "Hitmos" : "YouTube"} · ${item.artist || "исполнитель неизвестен"} · ${duration(item.duration_seconds)} · ${matchText[item.match?.status] || "совпадение не подтверждено"}${typeof item.match_score === "number" ? ` · оценка метаданных ${item.match_score.toFixed(2)} (не вероятность)` : ""}`;
       const open = document.createElement("a");
-      open.textContent = isHitmos ? "Слушать на сайте Hitmos ↗" : "Открыть это видео на YouTube ↗";
+      open.textContent = isHitmos ? "??????? ?? ????? Hitmos ?" : "??????? ??? ????? ?? YouTube ?";
       open.href = isHitmos ? `https://ru.hitmox.org/song/${item.id}` : `https://www.youtube.com/watch?v=${item.id}`;
       open.target = "_blank";
       open.rel = "noopener noreferrer";
@@ -2148,6 +2311,11 @@ const musicPlayer = (() => {
     document.querySelector("#youtube-advanced").hidden = isHitmos;
     externalSearch.hidden = isHitmos;
   }
+
+  fetch(`${apiBaseUrl}/api/audio/config`).then(response => response.ok ? response.json() : null).then(config => {
+    playbackTestButton.hidden = config?.playback_test_enabled !== true;
+    updateSourceControls();
+  }).catch(() => {});
 
   function presentSourceOptions(result) {
     const items = Array.isArray(result.candidates) ? result.candidates : [];
@@ -2240,12 +2408,12 @@ const musicPlayer = (() => {
           : "not performed; deferred until Play",
         audio_stream_network: "not started; browser playback has not been initiated",
       });
-      playbackState.textContent = result.source === "hitmos" && result.status === "external_player" ? "Плеер на Hitmos" : result.status === "available" ? "Выберите запись" : "Источник недоступен";
+      playbackState.textContent = result.source === "hitmos" && result.status === "external_player" ? "????? ?? Hitmos" : result.status === "available" ? "???????? ??????" : "???????? ??????????";
       showCandidates(Array.isArray(result.candidates) ? result.candidates : [], result.source);
       if (["hitmos", "youtube", "auto"].includes(result.source)) {
         const items = Array.isArray(result.candidates) ? result.candidates : [];
         const selectedSource = result.selected_source || result.source;
-        const chosen = candidateId ? items.find(item => item.id === candidateId && ["html_audio", "youtube_iframe"].includes(item.method) && item.match?.status !== "mismatch")
+        const chosen = candidateId ? items.find(item => item.id === candidateId && ["html_audio", "youtube_iframe", "dash_mse"].includes(item.method) && item.match?.status !== "mismatch")
           : result.selection === "automatic" ? items.find(item => item.id === result.selected_id && (item.source || result.source) === selectedSource && item.match?.status === "likely") : null;
         const chosenSource = chosen?.source || (candidateId ? provider : selectedSource);
         if (!chosen && provider === "auto" && result.selection === "choose"
@@ -2349,7 +2517,7 @@ const musicPlayer = (() => {
     }
     if (preparedSource) { resolveSource(preparedSource.id, true, preparedSource.source); return; }
     if (!ready) return;
-    if (activeKind === "hitmos" || activeKind === "torrent") {
+    if (["hitmos", "torrent", "dash"].includes(activeKind)) {
       if (!audio.paused) {
         if (activeKind === "torrent") torrentShouldResume = false;
         audio.pause();
@@ -2370,7 +2538,11 @@ const musicPlayer = (() => {
   seek.addEventListener("change", () => {
     seekDragging = false;
     if (!ready) return;
-    if (activeKind === "hitmos" || activeKind === "torrent") {
+    if (["hitmos", "torrent", "dash"].includes(activeKind)) {
+      if (activeKind === "dash") {
+        dashAdapter.seek(Number(seek.value));
+        return;
+      }
       if (audio.seekable.length && audio.seekable.end(audio.seekable.length - 1) > audio.seekable.start(0)) {
         audio.currentTime = Math.max(audio.seekable.start(0), Math.min(Number(seek.value), audio.seekable.end(audio.seekable.length - 1)));
       }
@@ -2379,7 +2551,7 @@ const musicPlayer = (() => {
   });
   volume.addEventListener("input", () => {
     if (!ready) return;
-    if (activeKind === "hitmos" || activeKind === "torrent") { audio.muted = false; audio.volume = Number(volume.value) / 100; }
+    if (["hitmos", "torrent", "dash"].includes(activeKind)) { audio.muted = false; audio.volume = Number(volume.value) / 100; }
     else player.setVolume(Number(volume.value));
   });
   document.addEventListener("visibilitychange", () => { if (document.hidden && ready && activeKind === "youtube") player.pauseVideo(); });

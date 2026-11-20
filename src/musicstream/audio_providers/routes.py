@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 import httpx
 from fastapi import APIRouter, Header, HTTPException, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from musicstream.audio_providers.base import RecordingReference, SourceResult
 from musicstream.audio_providers.hitmos import HitmosProvider
@@ -19,6 +19,7 @@ from musicstream.audio_providers.service import SourceSelectionService
 from musicstream.public_rate_limit import ClientRateLimiter
 from musicstream.audio_providers.hitmos_stream import HitmosStreamProxy, diagnostic_host_value
 from musicstream.audio_providers.transport import SourceFailure
+from musicstream.audio_providers.playback_adapter import FIXTURE as PLAYBACK_TEST_FIXTURE, PlaybackAdapter
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -45,6 +46,9 @@ async def audio_lifespan(app):
                                      diagnostics_enabled=local_diagnostics, lab_mode=lab_mode,
                                      stream_proxy=hitmos_proxy),
         }
+        playback_test_enabled = os.getenv("MUSICSTREAM_AUDIO_TRANSPORT_TEST", "").strip().lower() == "true"
+        app.state.playback_test_adapter = PlaybackAdapter() if playback_test_enabled else None
+        app.state.playback_test_enabled = playback_test_enabled
         app.state.hitmos_lab_mode = lab_mode
         app.state.hitmos_stream_proxy = hitmos_proxy
         app.state.audio_limiter = ClientRateLimiter(limit=lab_request_limit if lab_mode else 10)
@@ -55,6 +59,47 @@ async def audio_lifespan(app):
             yield
         finally:
             await hitmos_reader.close()
+
+
+@router.get("/api/audio/config")
+async def audio_config(request: Request):
+    return {"playback_test_enabled": bool(getattr(request.app.state, "playback_test_enabled", False))}
+
+
+@router.get("/api/audio/playback-test/prepare")
+async def prepare_playback_test(request: Request):
+    adapter = getattr(request.app.state, "playback_test_adapter", None)
+    if adapter is None:
+        raise HTTPException(404, "Not found")
+    grant = await adapter.prepare()
+    return {"source": "musicstream_test_mp3", "playback_url": f"/api/audio/playback-test/{grant.token}",
+            "expires_in_seconds": max(1, int(grant.expires_at - time.monotonic()))}
+
+
+@router.api_route("/api/audio/playback-test/{token}", methods=["GET", "HEAD"], include_in_schema=False)
+async def playback_test_stream(request: Request, token: str,
+                               range_header: str | None = Header(default=None, alias="Range")):
+    adapter = getattr(request.app.state, "playback_test_adapter", None)
+    if adapter is None:
+        raise HTTPException(404, "Not found")
+    if not token.isascii() or not (20 <= len(token) <= 64) or not all(c.isalnum() or c in "-_" for c in token):
+        raise HTTPException(404, "Not found")
+    status, headers, start, length = await adapter.open(token, range_header)
+    if request.method == "HEAD":
+        return Response(status_code=status, headers=headers)
+
+    async def body():
+        with PLAYBACK_TEST_FIXTURE.open("rb") as source:
+            source.seek(start)
+            remaining = length
+            while remaining:
+                chunk = await asyncio.to_thread(source.read, min(65536, remaining))
+                if not chunk:
+                    break
+                remaining -= len(chunk)
+                yield chunk
+
+    return StreamingResponse(body(), status_code=status, headers=headers)
 
 
 @router.get("/api/audio/hitmos-stream/{token}", include_in_schema=False)
@@ -102,7 +147,8 @@ async def resolve_audio(
     cache = request.app.state.audio_response_cache
     if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id"}
             or not title.strip() or not artist.strip() or (hitmos_id and provider != "hitmos")
-            or (hitmos_id and candidate_id) or (candidate_id and provider == "auto")
+            or (hitmos_id and candidate_id)
+            or (candidate_id and provider == "auto")
             or (candidate_id and provider == "youtube" and len(candidate_id) != 11)
             or (candidate_id and provider == "hitmos" and not candidate_id.isascii())
             or (candidate_id and provider == "hitmos" and not candidate_id.isdigit())):
@@ -117,8 +163,7 @@ async def resolve_audio(
             recording = RecordingReference(title=title.strip(), artist=artist.strip(),
                                            duration_seconds=duration_seconds,
                                            explicit_lyrics=explicit_lyrics)
-            return await request.app.state.source_selection.discover(recording,
-                                                                      allow_youtube=allow_youtube)
+            return await request.app.state.source_selection.discover(recording, allow_youtube=allow_youtube)
         return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
     retry_after = request.app.state.audio_limiter.check(peer)
     if retry_after:

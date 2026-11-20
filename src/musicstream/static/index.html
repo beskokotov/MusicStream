@@ -10,6 +10,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 40 40'%3E%3Crect width='40' height='40' rx='12' fill='%233bd6a0'/%3E%3Cpath d='M10 23v-6m7 12V11m7 15V14m7 9v-6' stroke='%230c1011' stroke-width='3' stroke-linecap='round'/%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
   <script src="/static/config.js" defer></script>
+  <script src="/static/dash-playback.js" defer></script>
   <script src="/static/app.js" defer></script>
 </head>
 <body>
@@ -62,6 +63,8 @@
     </section>
     <section id="catalog-view" class="catalog-view" hidden aria-live="polite"></section>
     <details id="developer-mode" class="developer-mode"><summary>&#x0414;&#x0438;&#x0430;&#x0433;&#x043D;&#x043E;&#x0441;&#x0442;&#x0438;&#x043A;&#x0430;&#x0020;&#x0438;&#x0020;&#x0440;&#x0443;&#x0447;&#x043D;&#x0430;&#x044F;&#x0020;&#x043D;&#x0430;&#x0441;&#x0442;&#x0440;&#x043E;&#x0439;&#x043A;&#x0430;&#x0020;&#x0438;&#x0441;&#x0442;&#x043E;&#x0447;&#x043D;&#x0438;&#x043A;&#x043E;&#x0432;</summary>
+      <button id="playback-test-button" type="button" hidden>Play test MP3</button>
+      <details id="dash-audio-lab"><summary>DASH / MSE Audio Lab</summary><p>Loads a clear BBC R&amp;D AAC-LC DASH sample into the shared MusicStream audio element. Use the player controls after loading.</p><button id="dash-audio-load" type="button">Load open DASH audio</button></details>
     <section id="playback-section" class="playback-section" aria-labelledby="playback-heading" hidden>
       <div class="section-heading"><h2 id="playback-heading">Источник воспроизведения</h2><span>YouTube / Hitmos</span></div>
       <p id="source-status" role="status" aria-live="polite">Выберите источник.</p>
@@ -74,7 +77,7 @@
       <p><a id="youtube-video-link" target="_blank" rel="noopener noreferrer" hidden>Открыть выбранное видео на YouTube ↗</a></p>
       <details id="hitmos-advanced"><summary>Дополнительно / Диагностика</summary><form id="hitmos-manual-form" hidden><label for="hitmos-url">Выбрали запись на Hitmos? Вставьте ссылку /song/… или ID</label><div class="manual-input"><input id="hitmos-url" type="text" maxlength="200" autocomplete="off" placeholder="https://ru.hitmox.org/song/…"><button type="submit">Проверить запись Hitmos</button></div><small>После проверки доступного потока можно попробовать встроенный плеер; при отказе остаётся переход на Hitmos.</small><p><a id="hitmos-song-link" target="_blank" rel="noopener noreferrer" hidden>Открыть выбранную запись на Hitmos ↗</a></p></form>
       <div id="source-diagnostics" hidden><strong>Диагностика источника</strong><p>Статус редиректа относится к выдаче адреса источником, а не к загрузке аудио CDN. MediaError не сообщает точный HTTP-статус CDN.</p><pre id="source-diagnostics-data"></pre></div></details>
-      <audio id="hitmos-audio" controls preload="none" hidden aria-label="Аудиоплеер Hitmos"></audio>
+      <audio id="hitmos-audio" controls preload="none" hidden aria-label="MusicStream audio player"></audio>
       <div id="youtube-frame-area" class="youtube-frame-area" hidden></div>
     </section>
     </details>

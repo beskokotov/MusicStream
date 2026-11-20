@@ -49,6 +49,21 @@ def test_resolved_cdn_is_returned_without_html_or_first_hop():
     assert "internal-document-not-for-client" not in result.model_dump_json()
 
 
+def test_source_confirmed_audio_url_needs_no_cdn_name_song_id_or_mp3_suffix():
+    media = "https://audio.example.net/files/opaque-stream?sig=temporary"
+    assert valid_stream_url(media, ID)
+    result = asyncio.run(HitmosProvider(Reader(media)).lookup(REF, ID))
+    assert result.status == "available"
+    assert result.candidates[0].stream_url == media
+
+
+def test_player_metadata_cannot_authorize_a_direct_third_party_url():
+    source = document().replace(PLAYER, "https://audio.example.net/files/opaque-stream")
+    from musicstream.audio_providers.hitmos import inspect_player_url
+
+    assert inspect_player_url(source, ID)[0] is None
+
+
 def test_lab_resolution_registers_token_without_a_duplicate_cdn_probe():
     class Proxy:
         calls = []
@@ -104,14 +119,29 @@ def test_source_issued_cdn_redirect_is_validated(status):
     assert valid_stream_url(CDN7,ID)
 
 
-@pytest.mark.parametrize("location", ["/song/81423717", "http://127.0.0.1/private",
-    "https://169.254.169.254/latest/meta-data", "https://untrusted.invalid/file.mp3",
-    CDN.replace("cdn13.deliciousoranges.com","cdn13.deliciousoranges.com.evil.invalid"),
+@pytest.mark.parametrize("location", ["http://127.0.0.1/private",
+    "https://169.254.169.254/latest/meta-data",
     CDN.replace("cdn13.deliciousoranges.com","user:secret@cdn13.deliciousoranges.com"),
     CDN.replace("cdn13.deliciousoranges.com","cdn13.deliciousoranges.com:8443"),
-    CDN.replace("https:","http:"), CDN.replace(ID,"1"), CDN+"?token=private", CDN+"#fragment"])
-def test_redirect_does_not_authorize_other_destinations(location):
+    CDN.replace("https:","http:"), CDN+"#fragment"])
+def test_redirect_does_not_authorize_unsafe_destinations(location):
     assert redirect_target(302,[{"name":"location","value":location}],PLAYER,ID) is None
+
+
+def test_redirect_accepts_public_media_host_without_id_or_mp3_suffix():
+    media = "https://untrusted.invalid/files/opaque-stream?sig=temporary"
+    assert redirect_target(302,[{"name":"Location","value":media}],PLAYER,ID) == media
+    assert valid_stream_url(media, ID)
+
+
+def test_redirect_must_start_at_the_selected_hitmos_player_url():
+    media = "https://audio.example.net/files/opaque-stream"
+    assert redirect_target(302,[{"name":"Location","value":media}],media,ID) is None
+
+
+def test_hitmos_player_request_accepts_safe_same_origin_path_without_audio_filename():
+    player = "https://ru.hitmox.org/player?id=opaque"
+    assert request_action(player, "Media", "GET", "main", "main", ID, player, False) == "player"
 
 
 @pytest.mark.parametrize("status", [200,206,401,403,404,500])

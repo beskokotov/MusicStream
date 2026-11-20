@@ -9,7 +9,7 @@ from urllib.parse import urlencode, urljoin, urlsplit
 
 from musicstream.audio_providers.base import AudioCandidate, AudioProvider, DiscoveredRecording, DiscoveryBatch, RecordingReference, ResolutionDiagnostics, SourceDocument, SourceResult
 from musicstream.audio_providers.matching import assess, normalize, versions
-from musicstream.audio_providers.selection import exact_metadata, rank_batch
+from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, rank_batch
 from musicstream.audio_providers.transport import SourceFailure
 
 MAX_SEARCH_CANDIDATES = 5
@@ -136,17 +136,6 @@ def parse_search_metadata(html: str, song_ids: list[str]) -> dict[str, tuple[str
     return result
 
 
-STREAM_PREFIXES = {
-    "ru.hitmox.org": "/get",
-    "cdn13.deliciousoranges.com": "/s1/get",
-    "cdn14.deliciousoranges.com": "/s1/get",
-    "cdn11.deliciousoranges.com": "/s1/get",
-    "cdn7.deliciousoranges.com": "/s2/get",
-    "s4.deliciouspeaches.com": "/get",
-}
-CDN_HOSTS = frozenset(STREAM_PREFIXES) - {"ru.hitmox.org"}
-
-
 def stream_format(url: str) -> str:
     try:
         path = urlsplit(url).path
@@ -160,24 +149,25 @@ def stream_format(url: str) -> str:
 
 
 def valid_stream_url(url: str, song_id: str) -> bool:
+    """Check safe HTTPS URL syntax; provenance and public DNS are checked separately."""
     if not isinstance(url, str) or not re.fullmatch(r"[0-9]{1,12}", song_id):
         return False
-    if url != url.strip() or any(ord(char) < 32 for char in url):
+    from musicstream.audio_providers.hitmos_stream import validated_audio_url
+    return validated_audio_url(url)
+
+
+def valid_hitmos_player_url(url: str, song_id: str) -> bool:
+    """Accept only a safe player URL supplied by the requested Hitmos page."""
+    if not valid_stream_url(url, song_id):
         return False
     try:
         parsed = urlsplit(url)
-        prefix = STREAM_PREFIXES.get(parsed.hostname)
-        return (bool(prefix) and parsed.scheme == "https"
-                and parsed.port in (None, 443) and not parsed.username and not parsed.password
-                and not parsed.query and not parsed.fragment
-                and bool(re.fullmatch(
-                    rf"{prefix}/(?:cuts/[a-f0-9]{{2}}/[a-f0-9]{{2}}/[a-f0-9]{{32}}/{song_id}/[A-Za-z0-9_-]+|music/[0-9]{{8}}/[A-Za-z0-9_-]+_{song_id})\.mp3",
-                    parsed.path)))
+        return parsed.hostname == "ru.hitmox.org"
     except ValueError:
         return False
 
 
-def inspect_player_url(html: str, song_id: str, *, lab_mode=False) -> tuple[str | None, ResolutionDiagnostics]:
+def inspect_player_url(html: str, song_id: str) -> tuple[str | None, ResolutionDiagnostics]:
     parser = _StructuredMetadata()
     parser.feed(html)
     expected = f"track-id-{song_id}"
@@ -195,16 +185,10 @@ def inspect_player_url(html: str, song_id: str, *, lab_mode=False) -> tuple[str 
         diagnostics.player_format = stream_format(raw)
         diagnostics.player_relative = raw.startswith("/") and not raw.startswith("//")
         url = urljoin("https://ru.hitmox.org", raw) if diagnostics.player_relative else raw
-        if valid_stream_url(url, song_id) or (lab_mode and _lab_url_valid(url)):
+        if valid_hitmos_player_url(url, song_id):
             diagnostics.player_valid = True
             return url, diagnostics
     return None, diagnostics
-
-
-def _lab_url_valid(url: str) -> bool:
-    # Import locally to avoid changing strict-mode startup behavior.
-    from musicstream.audio_providers.hitmos_stream import validated_audio_url
-    return validated_audio_url(url)
 
 
 def parse_stream_url(html: str, song_id: str) -> str | None:
@@ -266,7 +250,7 @@ class HitmosProvider(AudioProvider):
 
     async def _enrich_missing_durations(self, recording: RecordingReference,
                                         recordings: list[DiscoveredRecording], diagnostics=None
-                                        ) -> tuple[list[DiscoveredRecording], str | None]:
+                                        ) -> tuple[list[DiscoveredRecording], str | None, bool]:
         enrichment_started = time.monotonic()
         request_count = 0
         request_ids = []
@@ -287,7 +271,7 @@ class HitmosProvider(AudioProvider):
                 diagnostics.metadata_enrichment_ids = []
                 diagnostics.metadata_lookup_elapsed_ms = 0
                 diagnostics.stream_preparation_elapsed_ms = 0
-            return recordings, None
+            return recordings, None, False
 
         ranked = rank_batch(recording, DiscoveryBatch(
             source="hitmos", status="ok", reason="candidates_found", message="",
@@ -301,6 +285,8 @@ class HitmosProvider(AudioProvider):
             {"likely": 0, "uncertain": 1, "mismatch": 2}[candidate.match.status],
         ))
         wanted_title, wanted_artist = normalize(recording.title), normalize(recording.artist)
+        # A tied group with missing durations needs comparison before selection.
+        require_unique = sum(hitmos_missing_duration_match(recording, candidate) for candidate in ranked) > 1
         by_id = {item.id: item for item in recordings}
         selected_id = None
         for ranked_candidate in ranked:
@@ -354,10 +340,10 @@ class HitmosProvider(AudioProvider):
                 if (checked.status != "available" or checked_candidate.method != "html_audio"
                         or not checked_candidate.stream_url):
                     continue
-            elif candidate.match.status != "likely":
+            elif require_unique or candidate.match.status != "likely":
                 continue
 
-            if (candidate.match_score is not None and candidate.match_score >= .90
+            if (not require_unique and candidate.match_score is not None and candidate.match_score >= .90
                     and candidate.match.status == "likely"
                     and normalize(candidate.title) == wanted_title
                     and normalize(candidate.artist or "") == wanted_artist
@@ -374,7 +360,7 @@ class HitmosProvider(AudioProvider):
             diagnostics.metadata_enrichment_ids = request_ids
             diagnostics.metadata_lookup_elapsed_ms = metadata_lookup_ms
             diagnostics.stream_preparation_elapsed_ms = stream_preparation_ms
-        return [by_id[item.id] for item in recordings], selected_id
+        return [by_id[item.id] for item in recordings], selected_id, require_unique
 
     async def discover(self, recording: RecordingReference) -> DiscoveryBatch:
         fallback = DiscoveryBatch(
@@ -411,7 +397,7 @@ class HitmosProvider(AudioProvider):
                     recordings.append(DiscoveredRecording(id=song_id, title=title, artist=artist,
                         duration_seconds=duration, method="external_link",
                         external_url=f"https://ru.hitmox.org/song/{song_id}"))
-                recordings, auto_candidate_id = await self._enrich_missing_durations(
+                recordings, auto_candidate_id, require_unique = await self._enrich_missing_durations(
                     recording, recordings, document.diagnostics if isinstance(document, SourceDocument) else None)
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
@@ -421,6 +407,7 @@ class HitmosProvider(AudioProvider):
                             "Не удалось проверить метаданные найденных записей." if failures else "Hitmos не вернул кандидатов.",
                     search_url=fallback.search_url, recordings=recordings,
                     complete=(len(ids) <= MAX_SEARCH_CANDIDATES), auto_candidate_id=auto_candidate_id,
+                    require_unique_hitmos_match=require_unique,
                     diagnostics=(document.diagnostics if self.diagnostics_enabled
                                  and isinstance(document, SourceDocument) else None))
             except SourceFailure as exc:
@@ -465,18 +452,15 @@ class HitmosProvider(AudioProvider):
                 document.diagnostics.jsonld_extraction_elapsed_ms = round(
                     (time.monotonic() - extraction_started) * 1000)
             player_parse_started = time.monotonic()
-            stream_url, _ = inspect_player_url(html, song_id, lab_mode=self.lab_mode)
+            stream_url, _ = inspect_player_url(html, song_id)
             if isinstance(document, SourceDocument) and document.diagnostics is not None:
                 document.diagnostics.player_json_extraction_elapsed_ms = round(
                     (time.monotonic() - player_parse_started) * 1000)
             if isinstance(document, SourceDocument):
-                # Never publish the session-dependent first hop after a failed
-                # resolution, and never accept a redirect not on the CDN allowlist.
-                stream_url = document.stream_url
-                strict_ok = bool(stream_url and valid_stream_url(stream_url, song_id)
-                                 and urlsplit(stream_url).hostname in CDN_HOSTS)
-                lab_ok = bool(self.lab_mode and stream_url and _lab_url_valid(stream_url))
-                if not (strict_ok or lab_ok):
+                # Only the Browser Reader can supply this URL after observing
+                # the requested Hitmos page's player response and redirect.
+                stream_url = document.stream_url if not document.playback_reason else None
+                if not (stream_url and valid_stream_url(stream_url, song_id)):
                     stream_url = None
             match = assess(recording, title, artist, duration)
             if metadata_only:
@@ -485,17 +469,15 @@ class HitmosProvider(AudioProvider):
                     search_url=url, candidates=[AudioCandidate(id=song_id, title=title, artist=artist,
                         duration_seconds=duration, match=match, method="external_link", external_url=url)])
             direct = bool(stream_url) and match.status != "mismatch"
-            if direct and self.lab_mode:
-                if self.stream_proxy is None:
-                    raise SourceFailure("lab_proxy_unavailable", stage="stream_resolution", owner="local_policy")
-                # The playback request itself performs the same DNS-pinned
-                # Range/type/signature checks. Probing here would make the
-                # browser repeat the initial CDN Range request after resolve.
+            if direct and self.stream_proxy is not None:
+                # Keep the HTMLAudioElement on a same-origin URL. Its Range
+                # requests follow a bounded, DNS-pinned and audio-checked chain.
                 validated = await self.stream_proxy.register(stream_url)
                 stream_url = f"/api/audio/hitmos-stream/{validated.token}"
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.stage = "stream_resolution"
-                    document.diagnostics.redirect_host = validated.host
+                    if self.lab_mode:
+                        document.diagnostics.redirect_host = validated.host
                     document.diagnostics.path_type = validated.path_type
             candidate = AudioCandidate(id=song_id, title=title, artist=artist, duration_seconds=duration,
                                        match=match, method="html_audio" if direct else "external_link",

@@ -1146,7 +1146,7 @@ const musicPlayer = (() => {
     "player_redirect_elapsed_ms", "browser_request_count", "browser_navigation_count",
     "search_elapsed_ms", "metadata_enrichment_elapsed_ms", "metadata_lookup_elapsed_ms", "metadata_enrichment_requests",
     "stream_preparation_elapsed_ms", "matching_elapsed_ms", "metadata_status",
-    "player_relative", "player_valid", "redirect_status", "redirect_valid",
+    "player_relative", "player_valid", "redirect_status", "redirect_song_id_present", "redirect_valid",
   ];
   const sourceDiagnosticExtraFields = [
     "overall_resolve_elapsed_ms", "hitmos_search_request_ms", "candidate_resolve_request_ms",
@@ -1172,10 +1172,17 @@ const musicPlayer = (() => {
           && diagnostics.metadata_enrichment_ids.every(id => /^[0-9]{1,12}$/.test(id))) {
         safe.metadata_enrichment_ids = diagnostics.metadata_enrichment_ids;
       }
-      for (const key of ["player_format", "redirect_format"]) {
+      for (const key of ["player_format", "redirect_format", "redirect_extension"]) {
         if (["cuts", "music", "missing", "unsupported"].includes(diagnostics[key])) safe[key] = diagnostics[key];
+        else if (key === "redirect_extension" && ["mp3", "other"].includes(diagnostics[key])) safe[key] = diagnostics[key];
       }
-      if (/^(ru\.hitmox\.org|cdn(?:7|11|13|14|17)\.deliciousoranges\.com|s4\.deliciouspeaches\.com|unapproved)$/.test(diagnostics.redirect_host || "")) {
+      if (["get_cuts", "s1_get_cuts", "s2_get_cuts", "s3_get_cuts", "s4_get_cuts", "s5_get_cuts",
+        "s6_get_cuts", "s7_get_cuts", "s8_get_cuts", "s9_get_cuts", "get_music", "s1_get_music",
+        "s2_get_music", "s3_get_music", "s4_get_music", "s5_get_music", "s6_get_music",
+        "s7_get_music", "s8_get_music", "s9_get_music", "other"].includes(diagnostics.redirect_route)) {
+        safe.redirect_route = diagnostics.redirect_route;
+      }
+      if (/^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*$|^(host_[a-f0-9]{12}|unapproved)$/.test(diagnostics.redirect_host || "")) {
         safe.redirect_host = diagnostics.redirect_host;
       }
     }
@@ -1210,6 +1217,7 @@ const musicPlayer = (() => {
   let torrentShouldResume = false;
   let automaticHitmos = null;
   const hitmosPlaybackCache = new Map(); // Deezer ID -> short lived in-memory Hitmos source
+  let playingHitmosMatch = null;
   // Previous browser measurements: Hitmos playback became active in 1.85–2.52 s
   // after a resolved stream was assigned. Keep a modest margin for CDN variance.
   // Candidate resolution stays at 11 s; bounded Hitmos metadata discovery gets 16 s.
@@ -1235,6 +1243,7 @@ const musicPlayer = (() => {
 
   function stop() {
     generation += 1;
+    playingHitmosMatch = null;
     seekDragging = false;
     if (automaticHitmos?.timer) clearTimeout(automaticHitmos.timer);
     automaticHitmos = null;
@@ -1483,17 +1492,8 @@ const musicPlayer = (() => {
 
   function validHitmosStream(url, id) {
     if (typeof url !== "string" || !/^[0-9]{1,12}$/.test(id)) return false;
-    // Lab-mode playback accepts only the opaque same-origin route minted by
-    // MusicStream after validating a URL from the Hitmos resolver.
-    if (/^\/api\/audio\/hitmos-stream\/[A-Za-z0-9_-]{32,64}$/.test(url)) return true;
-    try {
-      const parsed = new URL(url);
-      const prefix = ({ "ru.hitmox.org": "/get", "cdn7.deliciousoranges.com": "/s2/get", "cdn13.deliciousoranges.com": "/s1/get",
-        "cdn14.deliciousoranges.com": "/s1/get", "cdn11.deliciousoranges.com": "/s1/get", "s4.deliciouspeaches.com": "/get" })[parsed.hostname];
-      return Boolean(prefix) && parsed.protocol === "https:"
-        && (!parsed.port || parsed.port === "443") && !parsed.username && !parsed.password && !parsed.search && !parsed.hash
-        && new RegExp(`^${prefix}/(?:cuts/[a-f0-9]{2}/[a-f0-9]{2}/[a-f0-9]{32}/${id}/[A-Za-z0-9_-]+|music/[0-9]{8}/[A-Za-z0-9_-]+_${id})\\.mp3$`).test(parsed.pathname);
-    } catch { return false; }
+    // Only the resolver-minted same-origin token can authorize Hitmos audio.
+    return /^\/api\/audio\/hitmos-stream\/[A-Za-z0-9_-]{32,64}$/.test(url);
   }
 
   function audioWaiting() {
@@ -1611,12 +1611,63 @@ const musicPlayer = (() => {
     }
   }
 
+  const normalizeHitmosMetadata = value => (value || "").normalize("NFKD").toLowerCase()
+    .replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
+
+  function hasExactHitmosNames(track, comparison) {
+    const title = normalizeHitmosMetadata(track.title);
+    const artist = normalizeHitmosMetadata(track.artist);
+    return Boolean(title && artist && comparison
+      && title === normalizeHitmosMetadata(comparison.candidate_title)
+      && artist === normalizeHitmosMetadata(comparison.candidate_artist));
+  }
+
+  function canAutoPrepareHitmos(track, item) {
+    const match = item.match;
+    return match?.status === "likely" || (match?.status === "uncertain"
+      && match.reasons?.length === 1 && match.reasons[0] === "duration_unknown"
+      && track.duration_seconds > 0 && match.comparison?.candidate_duration_seconds === null
+      && hasExactHitmosNames(track, match.comparison));
+  }
+
+  function verifiedHitmosMatch(track, item) {
+    if (track?.source !== "deezer" || !/^[0-9]{1,20}$/.test(String(track.id))
+        || !/^[0-9]{1,12}$/.test(item.id)) return null;
+    const comparison = item.match?.comparison;
+    const title = normalizeHitmosMetadata(track.title);
+    const artist = normalizeHitmosMetadata(track.artist);
+    if (!hasExactHitmosNames(track, comparison) || item.match.status === "mismatch"
+        || !Array.isArray(item.match.reasons)
+        || item.match.reasons.some(reason => !["explicit_unconfirmed", "duration_unknown"].includes(reason))
+        || track.duration_seconds !== comparison.reference_duration_seconds) return null;
+    return { songId: item.id, title, artist, duration: track.duration_seconds,
+      sourceDuration: comparison.candidate_duration_seconds, explicit: track.explicit_lyrics ?? null };
+  }
+
+  function hitmosMatchKey(track) {
+    return `musicstream.hitmos.match.v1.${track.id}`;
+  }
+
+  function readHitmosMatch(track) {
+    if (track.source !== "deezer" || !/^[0-9]{1,20}$/.test(String(track.id))) return null;
+    try {
+      const match = JSON.parse(localStorage.getItem(hitmosMatchKey(track)));
+      if (match && /^[0-9]{1,12}$/.test(match.songId)
+          && match.title === normalizeHitmosMetadata(track.title)
+          && match.artist === normalizeHitmosMetadata(track.artist)
+          && match.duration === track.duration_seconds
+          && match.explicit === (track.explicit_lyrics ?? null)) return match;
+    } catch { /* Storage can be unavailable. */ }
+    return null;
+  }
+
   function playHitmos(item, automatic = false) {
     if (!validHitmosStream(item.stream_url, item.id)) { fail("Адрес аудио не прошёл проверку браузерного адаптера.", "stream_resolution", "client_url_rejected"); return; }
     if (!automatic) stop();
     activeKind = "hitmos";
     setTilePlaybackState(selected?.id, "loading");
     const current = generation;
+    playingHitmosMatch = { current, track: selected, match: verifiedHitmosMatch(selected, item) };
     document.querySelector("#player-title").textContent = item.title || "Запись Hitmos";
     document.querySelector("#player-artist").textContent = item.artist || "Исполнитель неизвестен";
     document.querySelector("#player-duration").textContent = "—:—";
@@ -1698,17 +1749,17 @@ const musicPlayer = (() => {
     }
   }
 
-  async function prepareAutomaticPlayback() {
+  async function prepareAutomaticPlayback(failedHitmosId = null, startedAt = performance.now()) {
     if (!selected) return;
     stop();
     renderSourceDiagnostics();
-    const startedAt = performance.now();
     let current = generation;
     const track = selected;
     setTilePlaybackState(track.id, "loading");
     automaticHitmos = { startedAt, current, track, timer: null, phase: "search" };
+    const savedMatch = failedHitmosId ? null : readHitmosMatch(track);
     const cachedPlayback = hitmosPlaybackCache.get(String(track.id));
-    if (cachedPlayback && cachedPlayback.expiresAt > Date.now()) {
+    if (!savedMatch && !failedHitmosId && cachedPlayback && cachedPlayback.expiresAt > Date.now()) {
       renderSourceDiagnostics(null, {
         cache_status: "Hitmos playback URL reused from client cache",
         source_search_network: "not performed; source URL reused from client cache",
@@ -1741,7 +1792,8 @@ const musicPlayer = (() => {
     const timing = { hitmos_search_ms: null, hitmos_metadata_refinement_ms: null,
       hitmos_metadata_refinement_requests: null, hitmos_preselection_stream_preparation_ms: null,
       hitmos_resolve_ms: null, hitmos_stream_preparation_ms: null,
-      hitmos_first_audio_response_ms: null, fallback_reason: null };
+      hitmos_first_audio_response_ms: null, fallback_reason: null,
+      hitmos_saved_match: failedHitmosId ? "fallback_search" : "miss" };
     const fallback = (reason, discovery = null) => {
       if (current !== generation || !automaticHitmos) return;
       timing.fallback_reason = reason;
@@ -1767,6 +1819,50 @@ const musicPlayer = (() => {
     playbackState.textContent = "Проверяем Hitmos…";
     message.textContent = "Сначала проверяем точное совпадение и доступность аудио Hitmos.";
     section.setAttribute("aria-busy", "true");
+    if (savedMatch) {
+      const context = automaticHitmos;
+      const searchAfterFailure = () => {
+        if (current !== generation || automaticHitmos !== context) return;
+        try {
+          if (readHitmosMatch(track)?.songId === savedMatch.songId)
+            localStorage.removeItem(hitmosMatchKey(track));
+        } catch { /* Search still works when storage is unavailable. */ }
+        void prepareAutomaticPlayback(savedMatch.songId, startedAt);
+      };
+      const resolveParams = new URLSearchParams(params);
+      resolveParams.delete("allow_youtube");
+      resolveParams.set("provider", "hitmos");
+      resolveParams.set("hitmos_id", savedMatch.songId);
+      const resolveStarted = performance.now();
+      try {
+        const response = await fetchHitmos(`/api/audio/resolve?${resolveParams}`, HITMOS_LOOKUP_TIMEOUT_MS, "hitmos_resolve_timeout");
+        const result = response.ok ? await response.json() : null;
+        if (current !== generation || automaticHitmos !== context) return;
+        const item = result?.source === "hitmos" && result.status === "available"
+          && result.candidates?.find(candidate => candidate.id === savedMatch.songId
+            && candidate.method === "html_audio" && validHitmosStream(candidate.stream_url, candidate.id)
+            && verifiedHitmosMatch(track, candidate));
+        if (!item) return searchAfterFailure();
+        timing.hitmos_saved_match = "hit";
+        timing.hitmos_search_ms = 0;
+        timing.hitmos_resolve_ms = Math.round(performance.now() - resolveStarted);
+        context.phase = "audio_response";
+        context.timing = timing;
+        context.tryNextCandidate = searchAfterFailure;
+        context.timer = setTimeout(searchAfterFailure, HITMOS_AUDIO_START_TIMEOUT_MS);
+        renderSourceDiagnostics(result.diagnostics, {
+          cache_status: "Hitmos saved match",
+          hitmos_search_request_ms: 0,
+          candidate_resolve_request_ms: timing.hitmos_resolve_ms,
+          play_to_source_ready_ms: Math.round(performance.now() - startedAt),
+        });
+        playHitmos(item, true);
+      } catch {
+        searchAfterFailure();
+      }
+      return;
+    }
+    if (failedHitmosId) params.set("exclude_hitmos_id", failedHitmosId);
     let searchStarted = performance.now();
     let discoveryDiagnostics = null;
     let discoveryReusedCache = false;
@@ -1789,7 +1885,8 @@ const musicPlayer = (() => {
         ? diagnostics.stream_preparation_elapsed_ms : 0;
       const discoveredItems = Array.isArray(discovered.candidates) ? discovered.candidates : [];
       const candidates = discovered.selection === "automatic" && discovered.selected_source === "hitmos"
-        ? discoveredItems.filter(item => item.source === "hitmos" && item.match?.status === "likely"
+        ? discoveredItems.filter(item => item.source === "hitmos"
+          && (item.match?.status === "likely" || (item.id === discovered.selected_id && canAutoPrepareHitmos(track, item)))
           && /^[0-9]{1,12}$/.test(item.id))
           .sort((left, right) => left.id === discovered.selected_id ? -1 : right.id === discovered.selected_id ? 1
             : (right.match_score || 0) - (left.match_score || 0))
@@ -1830,7 +1927,7 @@ const musicPlayer = (() => {
             + prepared.diagnostics.elapsed_ms;
         }
         const playable = (prepared.candidates || []).find(item => item.id === candidate.id
-          && item.match?.status === "likely" && item.method === "html_audio"
+          && canAutoPrepareHitmos(track, item) && item.method === "html_audio"
           && validHitmosStream(item.stream_url, item.id));
         return prepared.status === "available" && playable
           ? { stream: playable, diagnostics: prepared.diagnostics || null, reusedCache: candidateReusedCache }
@@ -2123,6 +2220,12 @@ const musicPlayer = (() => {
       updateProgress();
       return;
     }
+    if (playingHitmosMatch?.current === generation && playingHitmosMatch.match) {
+      try {
+        localStorage.setItem(hitmosMatchKey(playingHitmosMatch.track), JSON.stringify(playingHitmosMatch.match));
+      } catch { /* Playback does not depend on storage. */ }
+      playingHitmosMatch = null;
+    }
     if (automaticHitmos && automaticHitmos.current === generation) {
       console.info("MusicStream Auto timing", {
         ...(automaticHitmos.timing || {}), chosen: "hitmos",
@@ -2332,11 +2435,8 @@ const musicPlayer = (() => {
     }
     showCandidates(items, result.source);
     renderSourceDiagnostics(result.diagnostics, {
-      source_search_network: candidateId ? "not performed; direct candidate resolution"
-        : result.reused_cache ? "not performed; discovery cache hit" : "performed",
-      candidate_resolution_network: candidateId
-        ? result.reused_cache ? "not performed; response cache hit" : "performed"
-        : "not performed; deferred until Play",
+      source_search_network: result.reused_cache ? "not performed; discovery cache hit" : "performed",
+      candidate_resolution_network: "not performed; deferred until Play",
       audio_stream_network: "not started; browser playback has not been initiated",
     });
     playbackState.textContent = items.length ? "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0437\u0430\u043f\u0438\u0441\u044c" : "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u0435\u043d";
@@ -2414,7 +2514,9 @@ const musicPlayer = (() => {
         const items = Array.isArray(result.candidates) ? result.candidates : [];
         const selectedSource = result.selected_source || result.source;
         const chosen = candidateId ? items.find(item => item.id === candidateId && ["html_audio", "youtube_iframe", "dash_mse"].includes(item.method) && item.match?.status !== "mismatch")
-          : result.selection === "automatic" ? items.find(item => item.id === result.selected_id && (item.source || result.source) === selectedSource && item.match?.status === "likely") : null;
+          : result.selection === "automatic" ? items.find(item => item.id === result.selected_id
+            && (item.source || result.source) === selectedSource
+            && (selectedSource === "hitmos" ? canAutoPrepareHitmos(selected, item) : item.match?.status === "likely")) : null;
         const chosenSource = chosen?.source || (candidateId ? provider : selectedSource);
         if (!chosen && provider === "auto" && result.selection === "choose"
             && items.some(item => item.source === "hitmos" && item.match?.status === "likely")) {

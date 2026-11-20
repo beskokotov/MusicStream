@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -22,8 +23,13 @@ async def main():
     ambiguous = (await HitmosProvider(Reader({"1": ("Sonne", "Rammstein", None),
                                              "2": ("Sonne", "Rammstein", None)})).find(REF)).model_dump()
     unavailable = (await HitmosProvider(Reader(error="source_http_error")).find(REF)).model_dump()
+    missing_duration_provider = HitmosProvider(Reader({"2": ("Sonne", "Rammstein", None)}))
+    missing_duration = (await SourceSelectionService({"hitmos": missing_duration_provider}).discover(REF)).model_dump()
     scenario = [automatic]
     requests = []
+    serve_audio = False
+    omit_duration = False
+    audio_token = "/api/audio/hitmos-stream/" + "A" * 32
     async with async_playwright() as runtime:
         try:
             browser = await runtime.chromium.launch(channel="chrome", headless=True)
@@ -33,6 +39,9 @@ async def main():
             page = await browser.new_page()
             errors = []
             page.on("pageerror", lambda error: errors.append(str(error)))
+            timings = []
+            page.on("console", lambda message: timings.append(message.args[1])
+                    if message.text.startswith("MusicStream Auto timing ") and len(message.args) > 1 else None)
 
             async def route_handler(route):
                 url = route.request.url
@@ -41,13 +50,22 @@ async def main():
                         "duration_seconds": 272, "explicit_lyrics": False, "source": "deezer"}])
                 if "/api/audio/resolve?" in url:
                     requests.append(url)
-                    if "hitmos_id=" in url:
-                        song_id = "2" if "hitmos_id=2" in url else "1"
+                    params = parse_qs(urlsplit(url).query)
+                    if "hitmos_id" in params:
+                        song_id = params["hitmos_id"][0]
                         if song_id == "1":
                             return await route.abort("failed")
-                        prepared = await provider.lookup(REF, song_id)
+                        source_provider = missing_duration_provider if omit_duration else provider
+                        prepared = await source_provider.lookup(REF, song_id)
+                        if serve_audio:
+                            prepared.candidates[0].stream_url = audio_token
                         return await route.fulfill(json=prepared.model_dump())
+                    if serve_audio:
+                        await asyncio.sleep(.160)
                     return await route.fulfill(json=scenario[0])
+                if serve_audio and url.endswith(audio_token):
+                    fixture = Path(__file__).resolve().parents[1] / "src/musicstream/static/audio-transport-test.mp3"
+                    return await route.fulfill(path=fixture, content_type="audio/mpeg")
                 if not url.startswith("http://127.0.0.1:8017/"):
                     return await route.abort()
                 resources = {
@@ -109,6 +127,71 @@ async def main():
             for width in (320, 390, 1280):
                 await page.set_viewport_size({"width": width, "height": 900})
                 assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+
+            async def select_after_reload():
+                await page.goto("http://127.0.0.1:8017/app")
+                await page.locator("#search-input").fill("Sonne")
+                await page.locator("#search-input").press("Enter")
+                await page.locator(".track-title").click()
+
+            async def wait_for_playing():
+                await page.wait_for_function("document.querySelector('.track-row').classList.contains('is-playing')")
+                reports = [await entry.json_value() for entry in timings]
+                return next(report["play_to_playing_ms"] for report in reversed(reports)
+                            if "play_to_playing_ms" in report)
+
+            scenario[0] = automatic
+            serve_audio = True
+            timings.clear()
+            await select_after_reload()
+            without_saved = await wait_for_playing()
+            key = "musicstream.hitmos.match.v1.1"
+            stored = json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))
+            assert stored["songId"] == "2" and stored["artist"] == "rammstein"
+            assert set(stored) == {"songId", "title", "artist", "duration", "sourceDuration", "explicit"}
+            requests.clear()
+            timings.clear()
+            scenario[0] = ambiguous
+            await select_after_reload()
+            with_saved = await wait_for_playing()
+            assert len(requests) == 1 and "hitmos_id=2" in requests[0]
+            print(f"Fixture play_to_playing_ms: search={without_saved}, saved={with_saved}")
+
+            serve_audio = False
+            scenario[0] = automatic
+            requests.clear()
+            await select_after_reload()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
+            assert "hitmos_id=2" in requests[0]
+            assert "provider=auto" in requests[1] and "exclude_hitmos_id=2" in requests[1]
+            assert await page.evaluate("(key) => localStorage.getItem(key)", key) is None
+
+            serve_audio = True
+            scenario[0] = ambiguous
+            await select_after_reload()
+            await page.wait_for_function("document.querySelectorAll('#source-candidates .source-candidate').length === 2")
+            await page.locator("#hitmos-advanced summary").click()
+            await page.locator("#hitmos-url").fill("https://ru.hitmox.org/song/2")
+            await page.locator("#hitmos-manual-form button").click()
+            await page.locator("#source-candidates button").click()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('is-playing')")
+            assert json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))["songId"] == "2"
+
+            omit_duration = True
+            requests.clear()
+            timings.clear()
+            await select_after_reload()
+            await wait_for_playing()
+            assert len(requests) == 1 and "hitmos_id=2" in requests[0]
+
+            await page.evaluate("(key) => localStorage.removeItem(key)", key)
+            scenario[0] = missing_duration
+            requests.clear()
+            timings.clear()
+            await select_after_reload()
+            await wait_for_playing()
+            assert len(requests) == 2
+            assert "provider=auto" in requests[0] and "hitmos_id=2" in requests[1]
             assert not errors, errors
             print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:

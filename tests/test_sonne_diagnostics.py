@@ -102,13 +102,29 @@ def test_diagnostics_are_opt_in_and_never_public(app,enabled,monkeypatch):
     monkeypatch.setenv("MUSICSTREAM_DIAGNOSTICS","true")
     monkeypatch.delenv("HITMOS_BROWSER_ENABLED",raising=False)
     diag=ResolutionDiagnostics(metadata_status=200,player_valid=True,redirect_status=302,
-                               redirect_host="s4.deliciouspeaches.com",redirect_valid=True)
+                               redirect_host="s4.deliciouspeaches.com",redirect_format="cuts",
+                               redirect_route="get_cuts",redirect_song_id_present=True,
+                               redirect_extension="mp3",redirect_valid=True)
     with TestClient(app) as api:
         provider=app.state.audio_providers["hitmos"]
         provider.reader=Reader(SourceDocument(document(),CASES[0][2],None,diag))
         response=api.get("/api/audio/resolve",params={"provider":"hitmos","hitmos_id":"57658982","title":"Sonne","artist":"Rammstein","duration_seconds":272})
         assert response.status_code==200
         assert (response.json()["diagnostics"] is not None)==enabled
+        if enabled:
+            redirect = response.json()["diagnostics"]
+            assert {key: redirect[key] for key in (
+                "redirect_status", "redirect_host", "redirect_format", "redirect_route",
+                "redirect_song_id_present", "redirect_extension", "redirect_valid",
+            )} == {
+                "redirect_status": 302,
+                "redirect_host": "s4.deliciouspeaches.com",
+                "redirect_format": "cuts",
+                "redirect_route": "get_cuts",
+                "redirect_song_id_present": True,
+                "redirect_extension": "mp3",
+                "redirect_valid": True,
+            }
         assert response.json()["candidates"][0]["match"]["comparison"]["duration_difference_seconds"]==0
 
 
@@ -144,15 +160,25 @@ def test_manual_search_is_a_separate_stage():
 
 
 @pytest.mark.parametrize("url",[
-    CASES[0][2].replace('s4.deliciouspeaches.com','s5.deliciouspeaches.com'),
-    CASES[1][2].replace('cdn14.deliciousoranges.com','cdn15.deliciousoranges.com'),
     CASES[2][2].replace('https:','http:'),
-    CASES[2][2]+'?token=private',
-    CASES[2][2].replace('_80274130.mp3','_1.mp3'),
+    CASES[2][2]+'#fragment',
+    CASES[2][2].replace('cdn11.deliciousoranges.com','user:secret@cdn11.deliciousoranges.com'),
+    CASES[2][2].replace('cdn11.deliciousoranges.com','cdn11.deliciousoranges.com:8443'),
+    CASES[2][2].replace('/get/music/','/get/music/%2fprivate/'),
+])
+def test_generic_audio_url_keeps_https_authority_and_path_safety(url):
+    assert not valid_stream_url(url,'80274130')
+
+
+@pytest.mark.parametrize("url",[
+    CASES[0][2].replace('s4.deliciouspeaches.com','media.example.net'),
+    CASES[1][2].replace('cdn14.deliciousoranges.com','cdn15.deliciousoranges.com'),
+    CASES[2][2]+'?signature=temporary',
+    CASES[2][2].replace('_80274130.mp3','_other-format'),
     CASES[2][2].replace('/20251120/','/not-a-date/'),
 ])
-def test_new_formats_keep_strict_security(url):
-    assert not valid_stream_url(url,'80274130')
+def test_generic_https_media_url_does_not_require_cdn_or_path_conventions(url):
+    assert valid_stream_url(url,'80274130')
 
 
 def test_relative_player_still_allows_only_one_exact_request_and_no_cdn_networking():

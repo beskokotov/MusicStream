@@ -5,11 +5,11 @@ import logging
 import re
 import time
 from collections import OrderedDict
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import urlencode
 
 from musicstream.audio_providers.base import DiscoveryBatch, ProviderSummary, RecordingReference, SourceResult
-from musicstream.audio_providers.hitmos import CDN_HOSTS, valid_stream_url
-from musicstream.audio_providers.selection import exact_metadata, rank_batch
+from musicstream.audio_providers.hitmos import valid_stream_url
+from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, rank_batch
 from musicstream.audio_providers.matching import normalize, versions
 
 logger = logging.getLogger(__name__)
@@ -110,9 +110,10 @@ class SourceSelectionService:
         self._put(self._batches, key, failure, 15)
         return failure
 
-    async def discover(self, recording: RecordingReference, *, allow_youtube=False) -> SourceResult:
+    async def discover(self, recording: RecordingReference, *, allow_youtube=False, exclude_hitmos_id=None) -> SourceResult:
         remembered = self._get(self._matches, reference_key(recording))
         if (remembered and remembered.selected_source in self.providers
+                and (remembered.selected_source != "hitmos" or remembered.selected_id != exclude_hitmos_id)
                 and (remembered.selected_source != "youtube" or allow_youtube)):
             remembered.reused_match = True
             remembered.reused_cache = True
@@ -121,6 +122,11 @@ class SourceSelectionService:
             return remembered
         names = [name for name in ("hitmos", "youtube") if name in self.providers and (name != "youtube" or allow_youtube)]
         batches = await asyncio.gather(*(self._discover(name, recording) for name in names))
+        if exclude_hitmos_id is not None:
+            batches = [batch.model_copy(update={
+                "recordings": [item for item in batch.recordings if item.id != exclude_hitmos_id],
+                "auto_candidate_id": None if batch.auto_candidate_id == exclude_hitmos_id else batch.auto_candidate_id,
+            }) if batch.source == "hitmos" else batch for batch in batches]
         if not allow_youtube:
             batches.append(DiscoveryBatch(source="youtube", status="blocked", reason="consent_required",
                 message="Для поиска и плеера YouTube требуется ваше согласие.", search_url=search_url("youtube", recording)))
@@ -150,11 +156,14 @@ class SourceSelectionService:
                                        and versions(f"{candidate.title} {candidate.artist or ''}")
                                        == versions(f"{recording.title} {recording.artist}")
                                        and not any(other.source != "hitmos" for other in confirmed)), None)
-        chosen = fast_candidate or first_confirmed_hitmos
+        require_unique_hitmos = bool(hitmos_batch and hitmos_batch.require_unique_hitmos_match)
+        chosen = None if require_unique_hitmos else fast_candidate or first_confirmed_hitmos
         if chosen is None:
-            chosen = (eligible[0] if (len(eligible) == 1 and complete and exact_metadata(recording, eligible[0])
-                                      and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe"))
-                      else equivalent_group[0] if equivalent_group
+            chosen = (eligible[0] if (len(eligible) == 1 and complete
+                                      and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe")
+                                      and (exact_metadata(recording, eligible[0])
+                                           or hitmos_missing_duration_match(recording, eligible[0])))
+                      else equivalent_group[0] if equivalent_group and not require_unique_hitmos
                       and not any(batch.status == "error" for batch in batches) else None)
         equivalent_ids = {candidate.id for candidate in equivalent_group}
         for candidate in candidates:
@@ -185,11 +194,10 @@ class SourceSelectionService:
             return False
         candidate = next((c for c in result.candidates if exact_metadata(recording, c)
                           and (c.method == "youtube_iframe" or (c.method == "html_audio" and c.stream_url))), None)
-        local_lab_stream = bool(candidate and candidate.stream_url and re.fullmatch(
+        local_hitmos_stream = bool(candidate and candidate.stream_url and re.fullmatch(
             r"/api/audio/hitmos-stream/[A-Za-z0-9_-]{32,64}", candidate.stream_url))
-        if candidate is None or (result.source == "hitmos" and not local_lab_stream and (
-                not valid_stream_url(candidate.stream_url, candidate.id)
-                or urlsplit(candidate.stream_url).hostname not in CDN_HOSTS)):
+        if candidate is None or (result.source == "hitmos" and not local_hitmos_stream and
+                                 not valid_stream_url(candidate.stream_url, candidate.id)):
             return False
         safe = candidate.model_copy(deep=True, update={"source": result.source, "stream_url": None,
                     "method": "external_link" if result.source == "hitmos" else "youtube_iframe",

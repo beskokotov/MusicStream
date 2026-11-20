@@ -36,7 +36,7 @@ async def audio_lifespan(app):
     except ValueError:
         lab_request_limit = 15
     lab_request_limit = max(5, min(30, lab_request_limit))
-    hitmos_proxy = HitmosStreamProxy() if lab_mode else None
+    hitmos_proxy = HitmosStreamProxy()
     async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, headers={"User-Agent": "MusicStream/0.1.0"}) as client:
         hitmos_reader = HitmosBrowserReader(diagnostics_enabled=local_diagnostics, lab_mode=lab_mode,
                                              request_limit=lab_request_limit if lab_mode else 5)
@@ -103,12 +103,12 @@ async def playback_test_stream(request: Request, token: str,
 
 
 @router.get("/api/audio/hitmos-stream/{token}", include_in_schema=False)
-async def hitmos_lab_stream(request: Request, token: str, range_header: str | None = Header(default=None, alias="Range")):
-    if not getattr(request.app.state, "hitmos_lab_mode", False):
+async def hitmos_stream(request: Request, token: str, range_header: str | None = Header(default=None, alias="Range")):
+    proxy = getattr(request.app.state, "hitmos_stream_proxy", None)
+    if proxy is None:
         raise HTTPException(404, "Not found")
     if not token.isascii() or not (32 <= len(token) <= 64) or not all(c.isalnum() or c in "-_" for c in token):
         raise HTTPException(404, "Not found")
-    proxy = request.app.state.hitmos_stream_proxy
     try:
         opened = await proxy.open(token, range_header)
         return StreamingResponse(opened.body(), status_code=opened.status_code, headers=opened.headers)
@@ -118,7 +118,7 @@ async def hitmos_lab_stream(request: Request, token: str, range_header: str | No
         headers = {"Cache-Control": "no-store"}
         if exc.retry_after_seconds is not None:
             headers["Retry-After"] = str(exc.retry_after_seconds)
-        logger.warning("Hitmos Lab stream rejected: stage=%s code=%s owner=%s status=%s retry_after=%s host=%s path_type=%s",
+        logger.warning("Hitmos stream rejected: stage=%s code=%s owner=%s status=%s retry_after=%s host=%s path_type=%s",
             exc.stage or "http_range", exc.reason, exc.owner or "unknown", exc.http_status,
             exc.retry_after_seconds, diagnostic_host_value(exc.host), exc.path_type or "unknown")
         raise HTTPException(status, detail={"reason": exc.reason, "stage": exc.stage or "http_range",
@@ -140,12 +140,14 @@ async def resolve_audio(
     candidate_id: Annotated[str | None, Query(pattern=r"^[a-zA-Z0-9_-]{1,12}$")] = None,
     allow_youtube: bool = False,
     deezer_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,20}$")] = None,
+    exclude_hitmos_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,12}$")] = None,
 ):
     peer = request.client.host if request.client else "unknown"
     cache_key = (title.strip(), artist.strip(), duration_seconds, explicit_lyrics,
-                 provider, hitmos_id or candidate_id, allow_youtube, deezer_id)
+                 provider, hitmos_id or candidate_id, allow_youtube, deezer_id, exclude_hitmos_id)
     cache = request.app.state.audio_response_cache
-    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id"}
+    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id", "exclude_hitmos_id"}
+            or (exclude_hitmos_id is not None and provider != "auto")
             or not title.strip() or not artist.strip() or (hitmos_id and provider != "hitmos")
             or (hitmos_id and candidate_id)
             or (candidate_id and provider == "auto")
@@ -163,7 +165,8 @@ async def resolve_audio(
             recording = RecordingReference(title=title.strip(), artist=artist.strip(),
                                            duration_seconds=duration_seconds,
                                            explicit_lyrics=explicit_lyrics)
-            return await request.app.state.source_selection.discover(recording, allow_youtube=allow_youtube)
+            return await request.app.state.source_selection.discover(
+                recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)
         return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
     retry_after = request.app.state.audio_limiter.check(peer)
     if retry_after:
@@ -177,7 +180,8 @@ async def resolve_audio(
             if hitmos_id or candidate_id:
                 result = await request.app.state.source_selection.prepare(recording, provider, hitmos_id or candidate_id)
             elif provider == "auto":
-                result = await request.app.state.source_selection.discover(recording, allow_youtube=allow_youtube)
+                result = await request.app.state.source_selection.discover(
+                    recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)
             else:
                 result = await request.app.state.audio_providers[provider].find(recording)
             if result.status in {"available", "external_player"}:

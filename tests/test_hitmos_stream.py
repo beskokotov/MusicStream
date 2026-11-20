@@ -110,6 +110,202 @@ def test_deferred_proxy_registration_uses_the_playback_range_for_validation(monk
     asyncio.run(run())
 
 
+def test_html_audio_play_and_seek_ranges_are_checked_on_each_request(monkeypatch):
+    import asyncio
+
+    from musicstream.audio_providers import hitmos_stream
+
+    requests = []
+
+    class Response:
+        status = 206
+
+        def __init__(self, range_value):
+            self.range_value = range_value
+            self.data = b"ID3\x04" + bytes(96)
+
+        def getheader(self, name, default=None):
+            return {
+                "Content-Type": "audio/mpeg",
+                "Content-Range": "bytes 0-99/2048" if self.range_value == "bytes=0-99" else "bytes 100-199/2048",
+                "Content-Length": "100",
+                "Accept-Ranges": "bytes",
+            }.get(name, default)
+
+        def read(self, size):
+            data, self.data = self.data[:size], self.data[size:]
+            return data
+
+        def close(self):
+            pass
+
+    async def open_checked(url, range_value, proxy_url=None):
+        requests.append((url, range_value))
+        return SimpleNamespace(response=Response(range_value), final_url=url, close=lambda: None)
+
+    monkeypatch.setattr(hitmos_stream, "_open_checked", open_checked)
+
+    async def run():
+        proxy = hitmos_stream.HitmosStreamProxy()
+        source = await proxy.register("https://media.example.net/audio/opaque-resource?sig=x")
+        played = await proxy.open(source.token, "bytes=0-99")
+        assert played.status_code == 206
+        assert len(b"".join([chunk async for chunk in played.body()])) == 100
+        sought = await proxy.open(source.token, "bytes=100-199")
+        assert sought.status_code == 206
+        assert sought.headers["Content-Range"] == "bytes 100-199/2048"
+        assert len(b"".join([chunk async for chunk in sought.body()])) == 100
+        assert requests == [
+            ("https://media.example.net/audio/opaque-resource?sig=x", "bytes=0-99"),
+            ("https://media.example.net/audio/opaque-resource?sig=x", "bytes=100-199"),
+        ]
+
+    asyncio.run(run())
+
+
+def test_third_party_media_requests_do_not_forward_cookies_or_authorization(monkeypatch):
+    from musicstream.audio_providers import hitmos_stream
+
+    observed = {}
+
+    class Response:
+        status = 302
+
+        def close(self):
+            pass
+
+    class Connection:
+        def __init__(self, host, ip, *, proxy_url=None, timeout=5.0):
+            pass
+
+        def request(self, method, target, *, headers):
+            observed.update(method=method, target=target, headers=headers)
+
+        def getresponse(self):
+            return Response()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(hitmos_stream, "_PinnedHTTPSConnection", Connection)
+    upstream = hitmos_stream._request_pinned("https://media.example.net/audio/opaque", "8.8.8.8", "bytes=0-99")
+    upstream.close()
+    headers = {key.lower() for key in observed["headers"]}
+    assert "cookie" not in headers
+    assert "authorization" not in headers
+
+
+def test_redirect_chain_is_bounded_and_dns_is_rechecked_for_every_hop(monkeypatch):
+    import asyncio
+
+    from musicstream.audio_providers import hitmos_stream
+
+    urls = [f"https://media{index}.example.net/resource" for index in range(4)]
+    resolved = []
+    requested = []
+
+    class Response:
+        def __init__(self, status, location=None):
+            self.status = status
+            self.location = location
+
+        def getheader(self, name, default=None):
+            return self.location if name.lower() == "location" else default
+
+        def close(self):
+            pass
+
+    def resolve(host):
+        resolved.append(host)
+        return ["8.8.8.8"]
+
+    def request(url, ip, range_value, proxy_url=None):
+        requested.append(url)
+        index = urls.index(url)
+        response = Response(302, urls[index + 1]) if index < 3 else Response(200)
+        return SimpleNamespace(response=response, final_url=url, close=lambda: None)
+
+    monkeypatch.setattr(hitmos_stream, "_resolve_public_addresses", resolve)
+    monkeypatch.setattr(hitmos_stream, "_request_pinned", request)
+
+    async def run():
+        upstream = await hitmos_stream._open_checked(urls[0], "bytes=0-99")
+        assert upstream.final_url == urls[-1]
+        upstream.close()
+
+    asyncio.run(run())
+    assert requested == urls
+    assert resolved == [f"media{index}.example.net" for index in range(4)]
+
+
+def test_redirect_chain_stops_at_the_configured_hop_limit(monkeypatch):
+    import asyncio
+
+    from musicstream.audio_providers import hitmos_stream
+
+    urls = [f"https://media{index}.example.net/resource" for index in range(5)]
+    requested = []
+
+    class Response:
+        status = 302
+
+        def __init__(self, location):
+            self.location = location
+
+        def getheader(self, name, default=None):
+            return self.location if name.lower() == "location" else default
+
+        def close(self):
+            pass
+
+    def resolve(_host):
+        return ["8.8.8.8"]
+
+    def request(url, ip, range_value, proxy_url=None):
+        requested.append(url)
+        index = urls.index(url)
+        return SimpleNamespace(response=Response(urls[index + 1]), final_url=url, close=lambda: None)
+
+    monkeypatch.setattr(hitmos_stream, "_resolve_public_addresses", resolve)
+    monkeypatch.setattr(hitmos_stream, "_request_pinned", request)
+
+    async def run():
+        with pytest.raises(SourceFailure) as error:
+            await hitmos_stream._open_checked(urls[0], "bytes=0-99")
+        assert error.value.reason == "audio_redirect_limit"
+
+    asyncio.run(run())
+    assert requested == urls[:4]
+
+
+def test_same_origin_hitmos_stream_route_serves_ranges_outside_lab_mode(monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from musicstream.main import app
+
+    class Opened:
+        status_code = 206
+        headers = {"Content-Type": "audio/mpeg", "Content-Range": "bytes 0-3/8",
+                   "Accept-Ranges": "bytes", "Cache-Control": "no-store"}
+
+        async def body(self):
+            yield b"ID3\x04"
+
+    async def open_stream(token, range_header):
+        assert token == "A" * 32
+        assert range_header == "bytes=0-3"
+        return Opened()
+
+    with TestClient(app) as client:
+        assert app.state.hitmos_lab_mode is False
+        monkeypatch.setattr(app.state.hitmos_stream_proxy, "open", open_stream)
+        response = client.get("/api/audio/hitmos-stream/" + "A" * 32,
+                              headers={"Range": "bytes=0-3"})
+        assert response.status_code == 206
+        assert response.headers["Content-Range"] == "bytes 0-3/8"
+        assert response.content == b"ID3\x04"
+
+
 def test_dns_rejects_a_mixed_public_and_private_answer(monkeypatch):
     from musicstream.audio_providers import hitmos_stream
 
@@ -124,13 +320,12 @@ def test_dns_rejects_a_mixed_public_and_private_answer(monkeypatch):
     assert error.value.owner == "local_policy"
 
 
-def test_dynamic_redirect_policy_is_lab_only():
+def test_dynamic_redirect_policy_accepts_safe_source_confirmed_media_urls():
     from musicstream.audio_providers.hitmos_browser import redirect_target
 
     headers = [{"name": "Location", "value": "https://media.example.net/audio/track.mp3?sig=x"}]
     source = "https://ru.hitmox.org/get/track"
-    assert redirect_target(302, headers, source, "123") is None
-    assert redirect_target(302, headers, source, "123", lab_mode=True) == headers[0]["value"]
+    assert redirect_target(302, headers, source, "123") == headers[0]["value"]
 
 
 def test_hitmos_lab_requires_explicit_environment(monkeypatch):
@@ -143,7 +338,7 @@ def test_hitmos_lab_requires_explicit_environment(monkeypatch):
         app = SimpleNamespace(state=SimpleNamespace(local_audio_diagnostics=True))
         async with audio_lifespan(app):
             assert app.state.hitmos_lab_mode is False
-            assert app.state.hitmos_stream_proxy is None
+            assert app.state.hitmos_stream_proxy is not None
 
     monkeypatch.delenv("HITMOS_LAB_MODE", raising=False)
     asyncio.run(run())

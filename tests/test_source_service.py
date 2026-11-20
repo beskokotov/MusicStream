@@ -276,6 +276,21 @@ def test_remembered_mapping_expires_and_all_caches_are_bounded():
     asyncio.run(run())
 
 
+def test_failed_saved_hitmos_id_is_excluded_without_changing_cached_candidates():
+    async def run():
+        provider = Provider("hitmos", [item(), item(id="2")])
+        service = SourceSelectionService({"hitmos": provider})
+        await service.prepare(REF, "hitmos", "1")
+        assert (await service.discover(REF)).selected_id == "1"
+        fallback = await service.discover(REF, exclude_hitmos_id="1")
+        assert not fallback.reused_match
+        assert fallback.selected_id == "2"
+        assert [candidate.id for candidate in fallback.candidates] == ["2"]
+        assert [recording.id for recording in provider.batch.recordings] == ["1", "2"]
+
+    asyncio.run(run())
+
+
 def test_youtube_prepare_uses_official_details_without_searching_again():
     async def run():
         calls = []

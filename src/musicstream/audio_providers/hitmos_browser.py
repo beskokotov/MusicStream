@@ -11,9 +11,9 @@ from contextlib import suppress
 from urllib.parse import parse_qs, urlencode, urljoin, urlsplit
 
 from musicstream.audio_providers.base import ResolutionDiagnostics, SourceDocument
-from musicstream.audio_providers.hitmos import CDN_HOSTS, STREAM_PREFIXES, inspect_player_url, stream_format, valid_stream_url
+from musicstream.audio_providers.hitmos import inspect_player_url, stream_format, valid_hitmos_player_url, valid_stream_url
 from musicstream.audio_providers.transport import SourceFailure
-from musicstream.audio_providers.hitmos_stream import validated_audio_url, retry_after_seconds
+from musicstream.audio_providers.hitmos_stream import retry_after_seconds
 from musicstream.audio_providers.hitmos_proxy_config import configured_hitmos_proxy
 from musicstream.public_rate_limit import ClientRateLimiter
 
@@ -74,34 +74,24 @@ def request_action(url, resource_type, method, frame_id, main_frame_id, song_id,
         return "document"
     if resource_type != "Media":
         return "block"
-    if player_url and not started and url == player_url and valid_stream_url(url, song_id):
-        if urlsplit(url).hostname == "ru.hitmox.org":
-            return "player"
+    if player_url and not started and url == player_url and valid_hitmos_player_url(url, song_id):
+        return "player"
     return "block"
 
 
-def redirect_target(status: int, headers: list[dict], source_url: str, song_id: str, *, lab_mode=False) -> str | None:
-    if status not in {301, 302, 303, 307, 308}:
+def redirect_target(status: int, headers: list[dict], source_url: str, song_id: str) -> str | None:
+    if status not in {301, 302, 303, 307, 308} or not valid_hitmos_player_url(source_url, song_id):
         return None
     locations = [header["value"] for header in headers if header["name"].lower() == "location"]
     if len(locations) != 1:
         return None
     try:
         target = urljoin(source_url, locations[0])
-        if ((valid_stream_url(target, song_id) and urlsplit(target).hostname in CDN_HOSTS)
-                or (lab_mode and validated_audio_url(target))):
+        if valid_stream_url(target, song_id):
             return target
     except ValueError:
         pass
     return None
-
-
-def can_use_lab_stream_url_directly(url: str) -> bool:
-    """Only media hosts may be probed directly; Hitmos URLs must issue their redirect."""
-    try:
-        return urlsplit(url).hostname != "ru.hitmox.org" and validated_audio_url(url)
-    except ValueError:
-        return False
 
 
 def _host_resolves_publicly(host: str) -> bool:
@@ -262,9 +252,17 @@ class HitmosBrowserReader:
                                             diagnostics.redirect_host = ("host_" + hashlib.sha256(host.lower().encode()).hexdigest()[:12]
                                                 if self.lab_mode and host else host if host and re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*", host) else "unapproved")
                                             diagnostics.redirect_format = stream_format(target_url)
-                                            route_match = re.match(r"^/(s[1-9]/)?get/(cuts|music)/", urlsplit(target_url).path)
+                                            redirect_path = urlsplit(target_url).path
+                                            route_match = re.match(r"^/(s[1-9]/)?get/(cuts|music)/", redirect_path)
                                             diagnostics.redirect_route = ((route_match[1][:-1] + "_" if route_match[1] else "")
                                                                           + "get_" + route_match[2] if route_match else "other")
+                                            diagnostics.redirect_song_id_present = bool(
+                                                re.search(rf"(?:^|/){re.escape(song_id)}(?:/|$)|_{re.escape(song_id)}(?:\.[^/]*)?$",
+                                                          redirect_path))
+                                            filename = redirect_path.rsplit("/", 1)[-1]
+                                            diagnostics.redirect_extension = (
+                                                "mp3" if filename.lower().endswith(".mp3") else
+                                                "other" if "." in filename else "missing")
                                         except ValueError:
                                             diagnostics.redirect_host = "unapproved"
                                     status = event.get("responseStatusCode")
@@ -292,11 +290,9 @@ class HitmosBrowserReader:
                                         diagnostics.http_status = status
                                         diagnostics.internal_code = "stream_response_unexpected"
                                     target = redirect_target(status or 0, event.get("responseHeaders", []),
-                                                             request["url"], song_id, lab_mode=self.lab_mode)
-                                    if (not target and diagnostics.redirect_host
-                                            and diagnostics.redirect_host not in STREAM_PREFIXES
-                                            and diagnostics.redirect_host != "unapproved"):
-                                            logger.warning("Hitmos unapproved redirect host=%s route=%s status=%s",
+                                                             request["url"], song_id)
+                                    if not target and diagnostics.redirect_host != "unapproved":
+                                        logger.warning("Hitmos redirect rejected: host=%s route=%s status=%s",
                                                        diagnostics.redirect_host, diagnostics.redirect_route,
                                                        diagnostics.redirect_status)
                                     if target:
@@ -394,24 +390,12 @@ class HitmosBrowserReader:
                     html = await read(target.path + ("?" + target.query if target.query else ""))
                     if metadata_only:
                         return result(html)
-                    player_url, inspection = inspect_player_url(html, song_id, lab_mode=self.lab_mode)
+                    player_url, inspection = inspect_player_url(html, song_id)
                     diagnostics.player_format = inspection.player_format
                     diagnostics.player_relative = inspection.player_relative
                     diagnostics.player_valid = inspection.player_valid
                     if not player_url:
                         return result(html, reason="stream_not_found")
-                    if urlsplit(player_url).hostname in CDN_HOSTS:
-                        host = urlsplit(player_url).hostname
-                        try:
-                            public_host = await asyncio.wait_for(
-                                asyncio.to_thread(_host_resolves_publicly, host), timeout=2)
-                        except TimeoutError:
-                            public_host = False
-                        if not public_host:
-                            return result(html, reason="stream_host_not_public")
-                        return result(html, player_url)
-                    if self.lab_mode and can_use_lab_stream_url_directly(player_url):
-                        return result(html, player_url)
                     state["player_url"] = player_url
                     # A normal metadata request gets the source-issued redirect.
                     # The redirect response is aborted before a CDN request.

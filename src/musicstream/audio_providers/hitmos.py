@@ -8,9 +8,10 @@ from html.parser import HTMLParser
 from urllib.parse import urlencode, urljoin, urlsplit
 
 from musicstream.audio_providers.base import AudioCandidate, AudioProvider, DiscoveredRecording, DiscoveryBatch, RecordingReference, ResolutionDiagnostics, SourceDocument, SourceResult
-from musicstream.audio_providers.matching import assess, normalize, versions
+from musicstream.audio_providers.matching import assess, assess_hitmos, normalize, versions
 from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, rank_batch
 from musicstream.audio_providers.transport import SourceFailure
+from musicstream.providers.base import ProviderError
 
 MAX_SEARCH_CANDIDATES = 5
 MAX_METADATA_ENRICHMENTS = 3
@@ -196,11 +197,12 @@ def parse_stream_url(html: str, song_id: str) -> str | None:
 
 
 class HitmosProvider(AudioProvider):
-    def __init__(self, reader=None, *, diagnostics_enabled=False, lab_mode=False, stream_proxy=None):
+    def __init__(self, reader=None, *, diagnostics_enabled=False, lab_mode=False, stream_proxy=None, track_credits=None):
         self.reader = reader
         self.diagnostics_enabled = diagnostics_enabled
         self.lab_mode = bool(lab_mode)
         self.stream_proxy = stream_proxy
+        self.track_credits = track_credits
         self._search_gate = asyncio.Semaphore(1)
         self._search_cache = OrderedDict()
         self._prepared_cache = OrderedDict()
@@ -362,6 +364,97 @@ class HitmosProvider(AudioProvider):
             diagnostics.stream_preparation_elapsed_ms = stream_preparation_ms
         return [by_id[item.id] for item in recordings], selected_id, require_unique
 
+    @staticmethod
+    def _search_recordings(document, recording):
+        html = document.html if isinstance(document, SourceDocument) else document
+        ids = parse_search_ids(html)
+        metadata = parse_search_metadata(html, ids)
+        recordings = []
+        for song_id in ids[:MAX_SEARCH_CANDIDATES]:
+            title, artist, duration = metadata.get(song_id, (recording.title, None, None))
+            recordings.append(DiscoveredRecording(id=song_id, title=title, artist=artist,
+                duration_seconds=duration, method="external_link",
+                external_url=f"https://ru.hitmox.org/song/{song_id}"))
+        return recordings, len(ids) <= MAX_SEARCH_CANDIDATES
+
+    async def _with_track_credits(self, recording):
+        if not recording.deezer_id or self.track_credits is None or recording.duration_seconds is None:
+            return recording
+        try:
+            async with asyncio.timeout(3):
+                title, primary_artist, duration, credits = await self.track_credits(recording.deezer_id)
+        except (ProviderError, TimeoutError):
+            return recording
+        primary = normalize(recording.artist)
+        if (normalize(title or "") != normalize(recording.title) or normalize(primary_artist or "") != primary
+                or duration is None or abs(duration - recording.duration_seconds) > max(5, recording.duration_seconds * .03)):
+            return recording
+        names = {}
+        for credit in credits:
+            name = normalize(credit)
+            if name and "," not in credit:
+                names.setdefault(name, credit.strip())
+        if primary not in names or len(names) < 2:
+            return recording
+        artist = ", ".join([names.pop(primary), *names.values()])
+        return recording.model_copy(update={"artist": artist}) if len(artist) <= 200 else recording
+
+    async def _search_by_coartist(self, recording, primary_recordings):
+        wanted_title, wanted_artist = normalize(recording.title), normalize(recording.artist)
+        if any(normalize(item.title) == wanted_title
+               and normalize(item.artist or "") in {"", wanted_artist}
+               and assess(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"
+               for item in primary_recordings):
+            return None
+
+        if "," not in recording.artist:
+            recording = await self._with_track_credits(recording)
+        artists = [name.strip() for name in recording.artist.split(",")]
+        if len(artists) < 2 or not all(artists) or len({normalize(name) for name in artists}) < 2:
+            return None
+        wanted_artist = normalize(recording.artist)
+        coartist = artists[-1]
+        query = f"{coartist} {recording.title}"
+        try:
+            document = await self.reader.read_search(query)
+            recordings, complete = self._search_recordings(document, recording)
+        except SourceFailure:
+            return None
+        candidates = [item for item in recordings if normalize(item.title) == wanted_title
+                      and normalize(coartist) in {normalize(name) for name in (item.artist or "").split(",")}
+                      and assess(recording, item.title, item.artist, item.duration_seconds).status != "mismatch"]
+        if not candidates:
+            return None
+        # Search credits may use a stage name. Only the full song page can
+        # confirm the original artist list before automatic playback.
+        if len(candidates) == 1 and complete:
+            candidate = candidates[0]
+            if not hasattr(self.reader, "read_song"):
+                return None
+            try:
+                async with asyncio.timeout(STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS):
+                    prepared = await self.prepare(recording, candidate.id)
+            except TimeoutError:
+                return None
+            verified = next((item for item in prepared.candidates if item.id == candidate.id), None)
+            if not verified:
+                return None
+            exact_names = (normalize(verified.title) == wanted_title
+                           and normalize(verified.artist or "") == wanted_artist)
+            explicit_unknown = (exact_names and verified.match.explicit_status == "unknown"
+                                and verified.match.reasons == ["explicit_unconfirmed"])
+            explicit_conflict = (verified.match.explicit_status == "conflicting"
+                                 and normalize(verified.title).removesuffix(" clean") == wanted_title
+                                 and normalize(verified.artist or "") == wanted_artist
+                                 and "duration_differs" not in verified.match.reasons
+                                 and "duration_unknown" not in verified.match.reasons)
+            if not (exact_metadata(recording, verified) or explicit_unknown or explicit_conflict):
+                return None
+            candidates = [candidate.model_copy(update={
+                "title": verified.title, "artist": verified.artist, "duration_seconds": verified.duration_seconds,
+            })]
+        return candidates, complete, document, query, recording.artist
+
     async def discover(self, recording: RecordingReference) -> DiscoveryBatch:
         fallback = DiscoveryBatch(
             source="hitmos", status="blocked", reason="manual_search_required",
@@ -370,7 +463,8 @@ class HitmosProvider(AudioProvider):
         )
         if self.reader is None or not hasattr(self.reader, "read_search"):
             return fallback
-        key = (recording.title, recording.artist, recording.duration_seconds, recording.explicit_lyrics)
+        key = (recording.title, recording.artist, recording.duration_seconds, recording.explicit_lyrics,
+               recording.deezer_id)
         async with self._search_gate:
             now = self._clock()
             for expired in [key for key, (until, _) in self._search_cache.items() if until <= now]:
@@ -383,31 +477,38 @@ class HitmosProvider(AudioProvider):
                 document = await self.reader.read_search(f"{recording.artist} {recording.title}")
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.search_elapsed_ms = document.diagnostics.elapsed_ms
-                html = document.html if isinstance(document, SourceDocument) else document
                 extraction_started = time.monotonic()
-                ids = parse_search_ids(html)
-                search_metadata = parse_search_metadata(html, ids)
+                recordings, complete = self._search_recordings(document, recording)
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.search_extraction_elapsed_ms = round(
                         (time.monotonic() - extraction_started) * 1000)
-                recordings = []
-                failures = 0
-                for song_id in ids[:MAX_SEARCH_CANDIDATES]:
-                    title, artist, duration = search_metadata.get(song_id, (recording.title, None, None))
-                    recordings.append(DiscoveredRecording(id=song_id, title=title, artist=artist,
-                        duration_seconds=duration, method="external_link",
-                        external_url=f"https://ru.hitmox.org/song/{song_id}"))
                 recordings, auto_candidate_id, require_unique = await self._enrich_missing_durations(
                     recording, recordings, document.diagnostics if isinstance(document, SourceDocument) else None)
+                search_url = fallback.search_url
+                manual_selection = False
+                hitmos_artist = None
+                alternate = await self._search_by_coartist(recording, recordings)
+                if alternate is not None:
+                    recordings, complete, alternate_document, query, hitmos_artist = alternate
+                    search_url = "https://ru.hitmox.org/search?" + urlencode({"q": query})
+                    auto_candidate_id, require_unique = None, False
+                    manual_selection = len(recordings) > 1 or not complete
+                    if (isinstance(document, SourceDocument) and document.diagnostics is not None
+                            and isinstance(alternate_document, SourceDocument) and alternate_document.diagnostics is not None):
+                        document.diagnostics.search_elapsed_ms = sum(
+                            value or 0 for value in (document.diagnostics.search_elapsed_ms,
+                                                     alternate_document.diagnostics.elapsed_ms))
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
                 result = DiscoveryBatch(source="hitmos", status="ok",
                     reason="candidates_found" if recordings else "no_results",
                     message="Метаданные найдены; поток будет проверен по Play." if recordings else
-                            "Не удалось проверить метаданные найденных записей." if failures else "Hitmos не вернул кандидатов.",
-                    search_url=fallback.search_url, recordings=recordings,
-                    complete=(len(ids) <= MAX_SEARCH_CANDIDATES), auto_candidate_id=auto_candidate_id,
+                            "Hitmos не вернул кандидатов.",
+                    search_url=search_url, recordings=recordings,
+                    complete=complete, auto_candidate_id=auto_candidate_id,
                     require_unique_hitmos_match=require_unique,
+                    hitmos_manual_selection=manual_selection,
+                    hitmos_artist=hitmos_artist,
                     diagnostics=(document.diagnostics if self.diagnostics_enabled
                                  and isinstance(document, SourceDocument) else None))
             except SourceFailure as exc:
@@ -462,7 +563,7 @@ class HitmosProvider(AudioProvider):
                 stream_url = document.stream_url if not document.playback_reason else None
                 if not (stream_url and valid_stream_url(stream_url, song_id)):
                     stream_url = None
-            match = assess(recording, title, artist, duration)
+            match = assess_hitmos(recording, title, artist, duration)
             if metadata_only:
                 return SourceResult(source="hitmos", status="external_player", reason="metadata_checked",
                     stage="matching", message="Метаданные проверены; доступность потока будет проверена по Play.",

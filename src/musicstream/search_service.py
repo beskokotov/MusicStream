@@ -16,12 +16,12 @@ from musicstream.audio_providers.routes import audio_lifespan
 @asynccontextmanager
 async def provider_lifespan(app: FastAPI, *, include_musicbrainz: bool = True):
     async with AsyncExitStack() as stack:
-        await stack.enter_async_context(audio_lifespan(app))
         deezer_client = await stack.enter_async_context(httpx.AsyncClient(
             timeout=httpx.Timeout(10.0),
             headers={"Accept": "application/json", "User-Agent": "MusicStream/0.1.0"},
         ))
         app.state.search_providers = {"deezer": DeezerProvider(deezer_client)}
+        await stack.enter_async_context(audio_lifespan(app, track_credits=app.state.search_providers["deezer"].track_credits))
         if include_musicbrainz:
             try:
                 settings = Settings.from_env()

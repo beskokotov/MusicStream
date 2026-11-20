@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 from musicstream.audio_providers.base import RecordingReference, ResolutionDiagnostics, SourceDocument
 from musicstream.audio_providers.hitmos import HitmosProvider, parse_search_ids, parse_search_metadata
 from musicstream.audio_providers.hitmos_browser import HitmosBrowserReader, _host_resolves_publicly, allowed_document, allowed_search_url, document_kind, redirect_target, request_action
-from musicstream.audio_providers.matching import assess
+from musicstream.audio_providers.matching import assess, assess_hitmos
 from musicstream.audio_providers.service import SourceSelectionService
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
@@ -58,6 +58,110 @@ class Reader:
 
 def find(reader, reference=REF):
     return asyncio.run(HitmosProvider(reader).find(reference))
+
+
+@pytest.mark.parametrize(("primary_has_match", "second_request", "page_title", "selection", "state"), [
+    (True, False, "FIX UR FACE", "automatic", "unknown"),
+    (False, True, "FIX UR FACE", "choose", "unknown"),
+    (False, True, "FIX UR FACE Clean", "choose", "conflicting"),
+])
+def test_deezer_credits_requested_only_for_missing_hitmos_match(primary_has_match, second_request, page_title, selection, state):
+    async def run():
+        title = "FIX UR FACE"
+        artist = "Machine Gun Kelly"
+        names = artist + ", Fred Durst"
+        ref = RecordingReference(title=title, artist=artist, duration_seconds=199,
+                                 explicit_lyrics=not primary_has_match, deezer_id="3963695871")
+        credits = AsyncMock(return_value=(title, artist, 199, [artist, "Fred Durst"]))
+
+        class CoartistReader(Reader):
+            async def read_search(self, query):
+                self.calls.append(("search", query))
+                if query == f"{artist} {title}":
+                    rows = {"1": (title, artist, 199)} if primary_has_match else {}
+                else:
+                    assert query == f"Fred Durst {title}"
+                    rows = {"82065078": (title, "mgk, Fred Durst", None)}
+                return await Reader(rows).read_search(query)
+
+        reader = CoartistReader({"82065078": (page_title, names, 199)})
+        service = SourceSelectionService({"hitmos": HitmosProvider(reader, track_credits=credits)})
+        result = await service.discover(ref)
+        assert result.selection == selection
+        assert result.selected_id == ("1" if primary_has_match else None)
+        assert [call[1] for call in reader.calls if call[0] == "search"] == (
+            [f"{artist} {title}", f"Fred Durst {title}"] if second_request else [f"{artist} {title}"])
+        if second_request:
+            credits.assert_awaited_once_with("3963695871")
+        else:
+            credits.assert_not_awaited()
+        if state:
+            item = result.candidates[0]
+            assert item.match.explicit_status == state
+            if second_request:
+                assert item.id == "82065078"
+                assert item.match.comparison.reference_artist == names
+        await service.discover(ref)
+        assert credits.await_count == int(second_request)
+
+    asyncio.run(run())
+
+
+def test_hitmos_explicit_label_is_confirmed_separately_from_user_choice():
+    ref = REF.model_copy(update={"explicit_lyrics": True})
+    assert assess_hitmos(ref, "Sonne (Explicit)", "Rammstein", 272).explicit_status == "confirmed"
+
+
+@pytest.mark.parametrize(("primary", "alternate", "page_artist", "page_title", "page_duration", "expected", "queries"), [
+    ("empty", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 2),
+    ("wrong", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 2),
+    ("exact", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "automatic", 1),
+    ("empty", "alias", "Another Artist, Fred Durst", "FIX UR FACE", 199, "none", 2),
+    ("empty", "alias", "Machine Gun Kelly, Fred Durst", "Another Song", 199, "none", 2),
+    ("empty", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 300, "none", 2),
+    ("empty", "duplicate", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "choose", 2),
+    ("empty", "empty", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "none", 2),
+    ("solo", "alias", "Machine Gun Kelly, Fred Durst", "FIX UR FACE", 199, "none", 1),
+])
+def test_hitmos_coartist_fallback(primary, alternate, page_artist, page_title, page_duration, expected, queries):
+    async def run():
+        full_artist = "Machine Gun Kelly, Fred Durst"
+        ref = RecordingReference(title="FIX UR FACE", artist="Fred Durst" if primary == "solo" else full_artist,
+                                 duration_seconds=199)
+        primary_query = f"{ref.artist} {ref.title}"
+
+        class CoartistReader(Reader):
+            async def read_search(self, query):
+                self.calls.append(("search", query))
+                if query == primary_query:
+                    rows = {"82065078": ("FIX UR FACE", full_artist, 199)} if primary == "exact" else (
+                        {"99": ("Different", full_artist, 199)} if primary == "wrong" else {})
+                else:
+                    assert query == "Fred Durst FIX UR FACE"
+                    rows = {} if alternate == "empty" else {"82065078": ("FIX UR FACE", "mgk, Fred Durst", None)}
+                    if alternate == "duplicate":
+                        rows["2"] = ("FIX UR FACE", full_artist, 199)
+                return await Reader(rows).read_search(query)
+
+        reader = CoartistReader({"82065078": (page_title, page_artist, page_duration)})
+        provider = HitmosProvider(reader)
+        service = SourceSelectionService({"hitmos": provider})
+        result = await service.discover(ref)
+        assert result.selection == expected
+        assert result.selected_id == ("82065078" if expected == "automatic" else None)
+        assert [call for call in reader.calls if call[0] == "search"] == (
+            [("search", primary_query)] + ([("search", "Fred Durst FIX UR FACE")] if queries == 2 else []))
+        detail_calls = [call for call in reader.calls if call[0] != "search"]
+        assert len(detail_calls) == int(queries == 2 and alternate == "alias")
+        if expected == "automatic" and queries == 2:
+            assert result.candidates[0].artist == full_artist
+            assert result.candidates[0].duration_seconds == 199
+            assert (await provider.prepare(ref, "82065078")).reused_cache
+        before = list(reader.calls)
+        assert (await provider.discover(ref)).reused_cache
+        assert reader.calls == before
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(("artist", "duration", "second_match", "expected"), [

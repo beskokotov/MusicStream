@@ -40,6 +40,15 @@ class _SearchResponse(BaseModel):
     data: list[_Track]
 
 
+class _TrackContributor(BaseModel):
+    name: str
+    role: str
+
+
+class _TrackDetail(_Track):
+    contributors: list[_TrackContributor] = Field(default_factory=list)
+
+
 class _Artist(BaseModel):
     id: int
     name: str
@@ -127,6 +136,17 @@ class DeezerProvider(SearchProvider):
         except ValidationError as exc:
             raise ProviderError("Deezer returned invalid catalog metadata", 502) from exc
         return parsed.data, parsed.total, bool(parsed.next)
+
+    async def track_credits(self, track_id: str) -> tuple[str | None, str | None, int | None, list[str]]:
+        payload = await self._get_json(f"track/{int(track_id)}", {})
+        try:
+            detail = _TrackDetail.model_validate(payload)
+        except ValidationError as exc:
+            raise ProviderError("Deezer returned invalid track credits", 502) from exc
+        if detail.id != int(track_id):
+            raise ProviderError("Deezer returned a different track", 502)
+        return (detail.title, detail.artist.name if detail.artist else None, detail.duration,
+                [credit.name for credit in detail.contributors if credit.role == "Main"])
 
     async def search_artists(self, query: str, limit: int = 10) -> dict:
         payload = await self._get_json("search/artist", {"q": query, "limit": limit})

@@ -66,6 +66,7 @@ class RecordingReference(BaseModel):
     duration_seconds: float | None = Field(default=None, ge=0, le=86400)
     # Deezer false means only "not flagged"; it does not prove a clean master.
     explicit_lyrics: bool | None = None
+    deezer_id: str | None = Field(default=None, pattern=r"^[0-9]{1,20}$")
 
 
 class RecordingComparison(BaseModel):
@@ -83,6 +84,7 @@ class MatchAssessment(BaseModel):
     status: Literal["likely", "uncertain", "mismatch"]
     reasons: list[str]
     comparison: RecordingComparison | None = None
+    explicit_status: Literal["confirmed", "conflicting", "unknown"] | None = None
 
 
 class AudioCandidate(BaseModel):
@@ -120,6 +122,8 @@ class DiscoveryBatch(BaseModel):
     complete: bool = True
     auto_candidate_id: str | None = Field(default=None, pattern=r"^[0-9]{1,12}$")
     require_unique_hitmos_match: bool = False
+    hitmos_manual_selection: bool = False
+    hitmos_artist: str | None = None
     diagnostics: ResolutionDiagnostics | None = None
     reused_cache: bool = False
 

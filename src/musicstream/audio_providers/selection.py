@@ -3,7 +3,7 @@
 from difflib import SequenceMatcher
 
 from musicstream.audio_providers.base import AudioCandidate, DiscoveryBatch, RecordingReference, SourceResult
-from musicstream.audio_providers.matching import assess, normalize
+from musicstream.audio_providers.matching import assess, assess_hitmos, normalize
 
 
 def exact_metadata(recording: RecordingReference, candidate: AudioCandidate) -> bool:
@@ -23,9 +23,12 @@ def hitmos_missing_duration_match(recording: RecordingReference, candidate: Audi
 
 
 def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceResult:
+    if batch.source == "hitmos" and batch.hitmos_artist:
+        recording = recording.model_copy(update={"artist": batch.hitmos_artist})
+    assess_candidate = assess_hitmos if batch.source == "hitmos" else assess
     candidates = []
     for item in batch.recordings:
-        match = assess(recording, item.title, item.artist, item.duration_seconds)
+        match = assess_candidate(recording, item.title, item.artist, item.duration_seconds)
         title = SequenceMatcher(None, normalize(recording.title), normalize(item.title)).ratio()
         artist = SequenceMatcher(None, normalize(recording.artist), normalize(item.artist or "")).ratio()
         duration = 0.0

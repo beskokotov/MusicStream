@@ -82,7 +82,7 @@ class SourceSelectionService:
 
     async def _discover(self, source, recording):
         provider = self.providers[source]
-        key = (source, id(provider), reference_key(recording))
+        key = (source, id(provider), reference_key(recording), recording.deezer_id if source == "hitmos" else None)
         url = search_url(source, recording)
         try:
             # Waiting for an occupied provider is included in its deadline.
@@ -131,6 +131,9 @@ class SourceSelectionService:
             batches.append(DiscoveryBatch(source="youtube", status="blocked", reason="consent_required",
                 message="Для поиска и плеера YouTube требуется ваше согласие.", search_url=search_url("youtube", recording)))
         matching_started = time.monotonic()
+        hitmos_batch = next((batch for batch in batches if batch.source == "hitmos"), None)
+        hitmos_reference = (recording.model_copy(update={"artist": hitmos_batch.hitmos_artist})
+                            if hitmos_batch and hitmos_batch.hitmos_artist else recording)
         results = [rank_batch(recording, batch) for batch in batches]
         candidates = [candidate for result in results for candidate in result.candidates]
         candidates.sort(key=lambda c: ({"likely": 0, "uncertain": 1, "mismatch": 2}[c.match.status],
@@ -138,33 +141,35 @@ class SourceSelectionService:
         eligible = [c for c in candidates if c.match.status != "mismatch"
                     and (c.source != "hitmos" or (
                         normalize(c.title) == normalize(recording.title)
-                        and (not c.artist or normalize(c.artist) == normalize(recording.artist))))]
+                        and (not c.artist or normalize(c.artist) == normalize(hitmos_reference.artist))))]
         complete = all(batch.complete for batch in batches if batch.status == "ok") and not any(batch.status == "error" for batch in batches)
         confirmed = [candidate for candidate in eligible if candidate.match.status == "likely"]
-        equivalent_group = _equivalent_hitmos_group(recording, confirmed)
-        hitmos_batch = next((batch for batch in batches if batch.source == "hitmos"), None)
+        equivalent_group = _equivalent_hitmos_group(hitmos_reference, confirmed)
         fast_candidate = next((candidate for candidate in confirmed
                                if hitmos_batch and candidate.id == hitmos_batch.auto_candidate_id
                                and candidate.source == "hitmos" and (candidate.match_score or 0) >= .90
-                               and exact_metadata(recording, candidate)
+                               and exact_metadata(hitmos_reference, candidate)
                                and versions(f"{candidate.title} {candidate.artist or ''}")
-                               == versions(f"{recording.title} {recording.artist}")
+                               == versions(f"{hitmos_reference.title} {hitmos_reference.artist}")
                                and not any(other.source != "hitmos" for other in confirmed)), None)
         first_confirmed_hitmos = next((candidate for candidate in confirmed
                                        if candidate.source == "hitmos" and (candidate.match_score or 0) >= .90
-                                       and exact_metadata(recording, candidate)
+                                       and exact_metadata(hitmos_reference, candidate)
                                        and versions(f"{candidate.title} {candidate.artist or ''}")
-                                       == versions(f"{recording.title} {recording.artist}")
+                                       == versions(f"{hitmos_reference.title} {hitmos_reference.artist}")
                                        and not any(other.source != "hitmos" for other in confirmed)), None)
         require_unique_hitmos = bool(hitmos_batch and hitmos_batch.require_unique_hitmos_match)
         chosen = None if require_unique_hitmos else fast_candidate or first_confirmed_hitmos
         if chosen is None:
+            reference = hitmos_reference if eligible and eligible[0].source == "hitmos" else recording
             chosen = (eligible[0] if (len(eligible) == 1 and complete
                                       and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe")
-                                      and (exact_metadata(recording, eligible[0])
-                                           or hitmos_missing_duration_match(recording, eligible[0])))
+                                      and (exact_metadata(reference, eligible[0])
+                                           or hitmos_missing_duration_match(reference, eligible[0])))
                       else equivalent_group[0] if equivalent_group and not require_unique_hitmos
                       and not any(batch.status == "error" for batch in batches) else None)
+        if chosen and chosen.source == "hitmos" and hitmos_batch.hitmos_manual_selection:
+            chosen = None
         equivalent_ids = {candidate.id for candidate in equivalent_group}
         for candidate in candidates:
             candidate.selection_reason = ("recording_mismatch" if candidate.match.status == "mismatch" else

@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def audio_lifespan(app):
+async def audio_lifespan(app, *, track_credits=None):
     explicitly_enabled = os.getenv("HITMOS_LAB_MODE", "").strip().lower() == "true"
     local_diagnostics = bool(getattr(app.state, "local_audio_diagnostics", False)) and (
         os.getenv("MUSICSTREAM_DIAGNOSTICS") == "true" or explicitly_enabled)
@@ -44,7 +44,7 @@ async def audio_lifespan(app):
             "youtube": YouTubeProvider(BoundedSourceClient(client), os.getenv("YOUTUBE_API_KEY", "").strip() or None),
             "hitmos": HitmosProvider(hitmos_reader,
                                      diagnostics_enabled=local_diagnostics, lab_mode=lab_mode,
-                                     stream_proxy=hitmos_proxy),
+                                     stream_proxy=hitmos_proxy, track_credits=track_credits),
         }
         playback_test_enabled = os.getenv("MUSICSTREAM_AUDIO_TRANSPORT_TEST", "").strip().lower() == "true"
         app.state.playback_test_adapter = PlaybackAdapter() if playback_test_enabled else None
@@ -164,14 +164,15 @@ async def resolve_audio(
         if provider == "auto":
             recording = RecordingReference(title=title.strip(), artist=artist.strip(),
                                            duration_seconds=duration_seconds,
-                                           explicit_lyrics=explicit_lyrics)
+                                           explicit_lyrics=explicit_lyrics, deezer_id=deezer_id)
             return await request.app.state.source_selection.discover(
                 recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)
         return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
     retry_after = request.app.state.audio_limiter.check(peer)
     if retry_after:
         raise HTTPException(429, "Source lookup limit reached", headers={"Retry-After": str(retry_after)})
-    recording = RecordingReference(title=title.strip(), artist=artist.strip(), duration_seconds=duration_seconds, explicit_lyrics=explicit_lyrics)
+    recording = RecordingReference(title=title.strip(), artist=artist.strip(), duration_seconds=duration_seconds,
+                                   explicit_lyrics=explicit_lyrics, deezer_id=deezer_id)
     try:
         operation_timeout = (30 if getattr(request.app.state, "hitmos_lab_mode", False) and (hitmos_id or candidate_id)
                              else 15 if provider == "auto" or (provider == "hitmos" and not (hitmos_id or candidate_id))

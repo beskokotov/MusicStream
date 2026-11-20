@@ -1614,9 +1614,15 @@ const musicPlayer = (() => {
   const normalizeHitmosMetadata = value => (value || "").normalize("NFKD").toLowerCase()
     .replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}_]+/gu, " ").trim();
 
+  function hitmosReferenceArtist(track, artist) {
+    if (typeof artist !== "string" || artist.length > 200) return track.artist;
+    const primary = normalizeHitmosMetadata(track.artist);
+    return artist.split(",").some(credit => normalizeHitmosMetadata(credit) === primary) ? artist : track.artist;
+  }
+
   function hasExactHitmosNames(track, comparison) {
     const title = normalizeHitmosMetadata(track.title);
-    const artist = normalizeHitmosMetadata(track.artist);
+    const artist = normalizeHitmosMetadata(hitmosReferenceArtist(track, comparison?.reference_artist));
     return Boolean(title && artist && comparison
       && title === normalizeHitmosMetadata(comparison.candidate_title)
       && artist === normalizeHitmosMetadata(comparison.candidate_artist));
@@ -1630,7 +1636,7 @@ const musicPlayer = (() => {
       && hasExactHitmosNames(track, match.comparison));
   }
 
-  function verifiedHitmosMatch(track, item) {
+  function verifiedHitmosMatch(track, item, userConfirmed = false) {
     if (track?.source !== "deezer" || !/^[0-9]{1,20}$/.test(String(track.id))
         || !/^[0-9]{1,12}$/.test(item.id)) return null;
     const comparison = item.match?.comparison;
@@ -1638,10 +1644,14 @@ const musicPlayer = (() => {
     const artist = normalizeHitmosMetadata(track.artist);
     if (!hasExactHitmosNames(track, comparison) || item.match.status === "mismatch"
         || !Array.isArray(item.match.reasons)
-        || item.match.reasons.some(reason => !["explicit_unconfirmed", "duration_unknown"].includes(reason))
+        || item.match.reasons.some(reason => reason !== "duration_unknown"
+          && !(userConfirmed && reason === "explicit_unconfirmed" && item.match.explicit_status === "unknown"))
         || track.duration_seconds !== comparison.reference_duration_seconds) return null;
+    const sourceArtist = hitmosReferenceArtist(track, comparison.reference_artist);
     return { songId: item.id, title, artist, duration: track.duration_seconds,
-      sourceDuration: comparison.candidate_duration_seconds, explicit: track.explicit_lyrics ?? null };
+      sourceDuration: comparison.candidate_duration_seconds, explicit: track.explicit_lyrics ?? null,
+      ...(normalizeHitmosMetadata(sourceArtist) !== artist ? { sourceArtist } : {}),
+      ...(userConfirmed ? { user_confirmed: true } : {}) };
   }
 
   function hitmosMatchKey(track) {
@@ -1661,13 +1671,13 @@ const musicPlayer = (() => {
     return null;
   }
 
-  function playHitmos(item, automatic = false) {
+  function playHitmos(item, automatic = false, userConfirmed = false) {
     if (!validHitmosStream(item.stream_url, item.id)) { fail("Адрес аудио не прошёл проверку браузерного адаптера.", "stream_resolution", "client_url_rejected"); return; }
     if (!automatic) stop();
     activeKind = "hitmos";
     setTilePlaybackState(selected?.id, "loading");
     const current = generation;
-    playingHitmosMatch = { current, track: selected, match: verifiedHitmosMatch(selected, item) };
+    playingHitmosMatch = { current, track: selected, match: verifiedHitmosMatch(selected, item, userConfirmed) };
     document.querySelector("#player-title").textContent = item.title || "Запись Hitmos";
     document.querySelector("#player-artist").textContent = item.artist || "Исполнитель неизвестен";
     document.querySelector("#player-duration").textContent = "—:—";
@@ -1833,6 +1843,7 @@ const musicPlayer = (() => {
       resolveParams.delete("allow_youtube");
       resolveParams.set("provider", "hitmos");
       resolveParams.set("hitmos_id", savedMatch.songId);
+      resolveParams.set("artist", hitmosReferenceArtist(track, savedMatch.sourceArtist));
       const resolveStarted = performance.now();
       try {
         const response = await fetchHitmos(`/api/audio/resolve?${resolveParams}`, HITMOS_LOOKUP_TIMEOUT_MS, "hitmos_resolve_timeout");
@@ -1841,7 +1852,7 @@ const musicPlayer = (() => {
         const item = result?.source === "hitmos" && result.status === "available"
           && result.candidates?.find(candidate => candidate.id === savedMatch.songId
             && candidate.method === "html_audio" && validHitmosStream(candidate.stream_url, candidate.id)
-            && verifiedHitmosMatch(track, candidate));
+            && verifiedHitmosMatch(track, candidate, savedMatch.user_confirmed === true));
         if (!item) return searchAfterFailure();
         timing.hitmos_saved_match = "hit";
         timing.hitmos_search_ms = 0;
@@ -1856,7 +1867,7 @@ const musicPlayer = (() => {
           candidate_resolve_request_ms: timing.hitmos_resolve_ms,
           play_to_source_ready_ms: Math.round(performance.now() - startedAt),
         });
-        playHitmos(item, true);
+        playHitmos(item, true, savedMatch.user_confirmed === true);
       } catch {
         searchAfterFailure();
       }
@@ -1909,7 +1920,8 @@ const musicPlayer = (() => {
       let lastReason = "hitmos_stream_unavailable";
       const candidateFailures = [];
       const resolveCandidate = async candidate => {
-        const resolveParams = new URLSearchParams({ title: track.title, artist: track.artist,
+        const resolveParams = new URLSearchParams({ title: track.title,
+          artist: hitmosReferenceArtist(track, candidate.match?.comparison?.reference_artist),
           provider: "hitmos", hitmos_id: candidate.id });
         if (/^[0-9]{1,20}$/.test(String(track.id))) resolveParams.set("deezer_id", String(track.id));
         if (typeof track.duration_seconds === "number") resolveParams.set("duration_seconds", String(track.duration_seconds));
@@ -2366,6 +2378,13 @@ const musicPlayer = (() => {
       const rejection = document.createElement("p");
       rejection.textContent = item.match?.reasons?.length ? `Причины: ${item.match.reasons.map(reason => reasons[reason] || "неизвестная проверка").join("; ")}.` : item.match?.status === "likely" ? "Отклонений по сопоставлению нет." : "Подробная причина сопоставления не предоставлена.";
       card.append(rejection);
+      if (isHitmos && item.match?.explicit_status && (selected?.explicit_lyrics || item.match.explicit_status !== "unknown")) {
+        const explicit = document.createElement("p");
+        explicit.textContent = { confirmed: "Explicit подтверждён источником.",
+          conflicting: "Метка версии источника противоречит Explicit.",
+          unknown: "Hitmos не подтвердил Explicit. Вы можете подтвердить выбор записи вручную." }[item.match.explicit_status];
+        card.append(explicit);
+      }
       if (item.selection_reason) {
         const choice = document.createElement("p");
         choice.textContent = ({ unique_high_confidence: "Выбрана автоматически: единственное точное совпадение метаданных.",
@@ -2376,8 +2395,10 @@ const musicPlayer = (() => {
         if (isHitmos && item.match?.status !== "mismatch") {
           const button = document.createElement("button");
           button.type = "button";
-          button.textContent = item.selection_reason === "unique_high_confidence" ? "Play · проверить поток и слушать" : "Выбрать и проверить поток";
-          button.addEventListener("click", () => resolveSource(item.id, true, "hitmos"));
+          button.textContent = item.match?.reasons?.includes("explicit_unconfirmed")
+            ? "Подтвердить запись и воспроизвести"
+            : item.selection_reason === "unique_high_confidence" ? "Play · проверить поток и слушать" : "Выбрать и проверить поток";
+          button.addEventListener("click", () => resolveSource(item.id, true, "hitmos", comparison?.reference_artist));
           card.append(button);
         }
       }
@@ -2392,7 +2413,7 @@ const musicPlayer = (() => {
         const button = document.createElement("button");
         button.type = "button";
         button.textContent = "Попробовать воспроизвести в MusicStream";
-        button.addEventListener("click", () => playHitmos(item));
+        button.addEventListener("click", () => playHitmos(item, false, true));
         card.append(button);
       } else if (isHitmos && item.method === "html_audio" && item.match?.status !== "mismatch") {
         const warning = document.createElement("p");
@@ -2446,7 +2467,7 @@ const musicPlayer = (() => {
     section.setAttribute("aria-busy", "false");
   }
 
-  async function resolveSource(candidateId = null, playAfterResolve = false, candidateSource = null) {
+  async function resolveSource(candidateId = null, playAfterResolve = false, candidateSource = null, hitmosArtist = null) {
     if (typeof candidateId !== "string") candidateId = null;
     const provider = candidateId ? candidateSource || "hitmos" : source.value;
     if (!selected) return;
@@ -2468,7 +2489,8 @@ const musicPlayer = (() => {
     playbackState.textContent = "Поиск источника…";
     section.setAttribute("aria-busy", "true");
     message.textContent = "Ищем источник и проверяем совпадение записи…";
-    const params = new URLSearchParams({ title: selected.title, artist: selected.artist, provider });
+    const artist = provider === "hitmos" ? hitmosReferenceArtist(selected, hitmosArtist) : selected.artist;
+    const params = new URLSearchParams({ title: selected.title, artist, provider });
     if (/^[0-9]{1,20}$/.test(String(selected.id))) params.set("deezer_id", String(selected.id));
     if (candidateId) params.set(provider === "hitmos" ? "hitmos_id" : "candidate_id", candidateId);
     if (provider === "auto") params.set("allow_youtube", String(consent.checked));
@@ -2524,13 +2546,14 @@ const musicPlayer = (() => {
           play.setAttribute("aria-label", "Проверить и воспроизвести аудио");
         }
         if (chosen && (chosenSource === "hitmos" ? /^[0-9]{1,12}$/ : /^[a-zA-Z0-9_-]{11}$/).test(chosen.id)) {
-          if (chosenSource === "hitmos" && validHitmosStream(chosen.stream_url, chosen.id)) {
+          if (chosenSource === "hitmos" && canAutoPrepareHitmos(selected, chosen)
+              && validHitmosStream(chosen.stream_url, chosen.id)) {
             hitmosPlaybackCache.set(String(selected.id), {
               item: { ...chosen, title: selected.title, artist: selected.artist },
               expiresAt: Date.now() + 45_000,
             });
           }
-          if (playAfterResolve && chosenSource === "hitmos" && validHitmosStream(chosen.stream_url, chosen.id)) { playHitmos(chosen); return; }
+          if (playAfterResolve && chosenSource === "hitmos" && validHitmosStream(chosen.stream_url, chosen.id)) { playHitmos(chosen, false, true); return; }
           if (playAfterResolve && chosenSource === "youtube" && consent.checked) { cue(chosen.id, chosen, true); return; }
           preparedSource = { ...chosen, source: chosenSource };
           play.disabled = false;
@@ -2617,7 +2640,10 @@ const musicPlayer = (() => {
       prepareAutomaticPlayback();
       return;
     }
-    if (preparedSource) { resolveSource(preparedSource.id, true, preparedSource.source); return; }
+    if (preparedSource) {
+      resolveSource(preparedSource.id, true, preparedSource.source, preparedSource.match?.comparison?.reference_artist);
+      return;
+    }
     if (!ready) return;
     if (["hitmos", "torrent", "dash"].includes(activeKind)) {
       if (!audio.paused) {

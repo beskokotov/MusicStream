@@ -25,6 +25,20 @@ def versions(title: str) -> set[str]:
     return {"remaster" if tag == "remastered" else tag for tag in VERSIONS if f" {tag} " in normalized}
 
 
+def assess_hitmos(recording, title, artist, duration):
+    match = assess(recording, title, artist, duration)
+    labels = versions(title)
+    expected = versions(recording.title)
+    if (("clean" in labels and (recording.explicit_lyrics is True or "explicit" in expected))
+            or ("explicit" in labels and "clean" in expected)):
+        match.explicit_status = "conflicting"
+    elif "explicit" in labels:
+        match.explicit_status = "confirmed"
+    else:
+        match.explicit_status = "unknown"
+    return match
+
+
 def assess(recording: RecordingReference, title: str, artist: str | None, duration: float | None) -> MatchAssessment:
     reasons = []
     wanted_title = normalize(recording.title)

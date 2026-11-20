@@ -89,12 +89,15 @@ class AudioCandidate(BaseModel):
     artist: str | None = None
     duration_seconds: float | None = None
     match: MatchAssessment
-    method: Literal["youtube_iframe", "external_link", "html_audio"]
+    method: Literal["youtube_iframe", "external_link", "html_audio", "vk_unavailable", "dash_mse"]
     external_url: str
     stream_url: str | None = None
     selection_reason: str | None = None
-    source: Literal["youtube", "hitmos"] | None = None
+    source: Literal["youtube", "hitmos", "vk"] | None = None
     match_score: float | None = Field(default=None, ge=0, le=1)
+    playback_status: Literal["playback_unavailable"] | None = None
+    playback_reason: str | None = None
+    playback_id: str | None = None
 
 
 class DiscoveredRecording(BaseModel):
@@ -104,17 +107,18 @@ class DiscoveredRecording(BaseModel):
     title: str
     artist: str | None = None
     duration_seconds: float | None = None
-    method: Literal["youtube_iframe", "external_link", "html_audio"]
+    method: Literal["youtube_iframe", "external_link", "html_audio", "vk_unavailable"]
     external_url: str
 
 
 class DiscoveryBatch(BaseModel):
-    source: Literal["youtube", "hitmos"]
+    source: Literal["youtube", "hitmos", "vk"]
     status: Literal["ok", "blocked", "error"]
     reason: str
     message: str
     search_url: str
     recordings: list[DiscoveredRecording] = Field(default_factory=list)
+    candidate_count: int | None = Field(default=None, ge=0, le=1000)
     complete: bool = True
     auto_candidate_id: str | None = Field(default=None, pattern=r"^[0-9]{1,12}$")
     diagnostics: ResolutionDiagnostics | None = None
@@ -122,7 +126,7 @@ class DiscoveryBatch(BaseModel):
 
 
 class ProviderSummary(BaseModel):
-    source: Literal["youtube", "hitmos"]
+    source: Literal["youtube", "hitmos", "vk"]
     status: Literal["ok", "blocked", "error"]
     reason: str
     message: str
@@ -130,8 +134,8 @@ class ProviderSummary(BaseModel):
 
 
 class SourceResult(BaseModel):
-    source: Literal["youtube", "hitmos", "auto"]
-    status: Literal["available", "unavailable", "error", "external_player"]
+    source: Literal["youtube", "hitmos", "vk", "auto"]
+    status: Literal["available", "unavailable", "error", "external_player", "playback_unavailable"]
     reason: str
     message: str
     search_url: str
@@ -140,7 +144,7 @@ class SourceResult(BaseModel):
     diagnostics: ResolutionDiagnostics | None = None
     selection: Literal["none", "automatic", "choose"] = "none"
     selected_id: str | None = None
-    selected_source: Literal["youtube", "hitmos"] | None = None
+    selected_source: Literal["youtube", "hitmos", "vk"] | None = None
     sources: list[ProviderSummary] = Field(default_factory=list)
     reused_match: bool = False
     reused_cache: bool = False

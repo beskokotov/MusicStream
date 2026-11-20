@@ -33,10 +33,15 @@ def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceRe
         candidate.selection_reason = ("recording_mismatch" if candidate.match.status == "mismatch" else
                                       "unique_high_confidence" if candidate is selected else "manual_confirmation_required")
     available = any(c.method == "youtube_iframe" and c.match.status != "mismatch" for c in candidates)
-    result = SourceResult(source=batch.source, status="available" if available else "error" if batch.status == "error" else
+    vk_candidates = batch.source == "vk" and bool(candidates)
+    if vk_candidates:
+        for candidate in candidates:
+            candidate.playback_status = "playback_unavailable"
+    result = SourceResult(source=batch.source, status="playback_unavailable" if vk_candidates else "available" if available else "error" if batch.status == "error" else
                         "external_player" if candidates or batch.status == "blocked" else "unavailable",
-        reason=("unique_high_confidence" if selected else "ambiguous_candidates" if candidates else batch.reason),
-        message=("Найдено единственное точное совпадение метаданных. Нажмите Play; идентичность мастера и доступность воспроизведения ещё не подтверждены." if selected else
+        reason=("vk_external_playback_not_verified" if vk_candidates else "unique_high_confidence" if selected else "ambiguous_candidates" if candidates else batch.reason),
+        message=("Поток VK нельзя передать во внешний плеер разрешённым способом, подтверждённым для MusicStream. Откройте запись в штатном VK." if vk_candidates else
+                 "Найдено единственное точное совпадение метаданных. Нажмите Play; идентичность мастера и доступность воспроизведения ещё не подтверждены." if selected else
                  "Выберите запись: однозначное совпадение не подтверждено. Отклонённые версии не запускаются встроенным плеером." if candidates else batch.message),
         stage="matching" if candidates else "source_search", search_url=batch.search_url,
         candidates=candidates, diagnostics=batch.diagnostics,

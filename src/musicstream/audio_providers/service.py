@@ -22,8 +22,11 @@ def reference_key(recording: RecordingReference) -> tuple:
 
 def search_url(source: str, recording: RecordingReference) -> str:
     query = f"{recording.artist} {recording.title}"
-    return ("https://ru.hitmox.org/search?" + urlencode({"q": query}) if source == "hitmos" else
-            "https://www.youtube.com/results?" + urlencode({"search_query": query}))
+    if source == "hitmos":
+        return "https://ru.hitmox.org/search?" + urlencode({"q": query})
+    if source == "vk":
+        return "https://vk.com/audio"
+    return "https://www.youtube.com/results?" + urlencode({"search_query": query})
 
 
 def _equivalent_hitmos_group(recording: RecordingReference, candidates):
@@ -62,7 +65,7 @@ class SourceSelectionService:
         self.clock = clock
         self._batches = OrderedDict()
         self._matches = OrderedDict()
-        self._gates = {name: asyncio.Semaphore(1) for name in ("hitmos", "youtube")}
+        self._gates = {name: asyncio.Semaphore(1) for name in ("hitmos", "youtube", "vk")}
         self._outbound = asyncio.Semaphore(2)
 
     def _get(self, cache, key):
@@ -110,7 +113,7 @@ class SourceSelectionService:
         self._put(self._batches, key, failure, 15)
         return failure
 
-    async def discover(self, recording: RecordingReference, *, allow_youtube=False) -> SourceResult:
+    async def discover(self, recording: RecordingReference, *, allow_youtube=False, include_vk=False) -> SourceResult:
         remembered = self._get(self._matches, reference_key(recording))
         if (remembered and remembered.selected_source in self.providers
                 and (remembered.selected_source != "youtube" or allow_youtube)):
@@ -119,7 +122,8 @@ class SourceSelectionService:
             remembered.diagnostics = None
             remembered.message = "Повторно выбрано ранее проверенное соответствие метаданных. Нажмите Play: источник будет проверен заново."
             return remembered
-        names = [name for name in ("hitmos", "youtube") if name in self.providers and (name != "youtube" or allow_youtube)]
+        names = [name for name in ("hitmos", "youtube", "vk") if name in self.providers
+                 and (name != "youtube" or allow_youtube) and (name != "vk" or include_vk)]
         batches = await asyncio.gather(*(self._discover(name, recording) for name in names))
         if not allow_youtube:
             batches.append(DiscoveryBatch(source="youtube", status="blocked", reason="consent_required",
@@ -150,7 +154,14 @@ class SourceSelectionService:
                                        and versions(f"{candidate.title} {candidate.artist or ''}")
                                        == versions(f"{recording.title} {recording.artist}")
                                        and not any(other.source != "hitmos" for other in confirmed)), None)
-        chosen = fast_candidate or first_confirmed_hitmos
+        first_confirmed_vk = next((candidate for candidate in confirmed
+                                   if candidate.source == "vk" and candidate.match_score is not None
+                                   and candidate.match_score >= .90 and candidate.duration_seconds is not None
+                                   and exact_metadata(recording, candidate)
+                                   and versions(f"{candidate.title} {candidate.artist or ''}")
+                                   == versions(f"{recording.title} {recording.artist}")
+                                   and not any(other.source != "vk" for other in confirmed)), None)
+        chosen = fast_candidate or first_confirmed_hitmos or first_confirmed_vk
         if chosen is None:
             chosen = (eligible[0] if (len(eligible) == 1 and complete and exact_metadata(recording, eligible[0])
                                       and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe"))
@@ -210,7 +221,9 @@ class SourceSelectionService:
                 del self._batches[cached]
 
     async def prepare(self, recording, source, candidate_id):
-        pattern = r"[0-9]{1,12}" if source == "hitmos" else r"[a-zA-Z0-9_-]{11}"
+        patterns = {"hitmos": r"[0-9]{1,12}", "youtube": r"[a-zA-Z0-9_-]{11}",
+                    "vk": r"-?[0-9]{1,12}_-?[0-9]{1,12}"}
+        pattern = patterns.get(source, r"(?!)")
         if source not in self.providers or not re.fullmatch(pattern, candidate_id):
             raise ValueError("Invalid source candidate")
         try:

@@ -17,7 +17,11 @@ from musicstream.providers.base import ProviderError
 MAX_SEARCH_CANDIDATES = 5
 MAX_METADATA_ENRICHMENTS = 3
 STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS = 6.0
-HITMOS_BUDGET_MESSAGE = "Достигнут локальный лимит запросов Hitmos. Повторите попытку после паузы."
+
+
+def _hitmos_budget_message(retry_after_seconds: int | None) -> str:
+    wait = f"через {retry_after_seconds} с" if retry_after_seconds is not None else "после паузы"
+    return f"Достигнут локальный лимит запросов Hitmos. Повторите попытку {wait}."
 
 
 class _StructuredMetadata(HTMLParser):
@@ -485,7 +489,8 @@ class HitmosProvider(AudioProvider):
                 _, batch, retry_at = cached
                 remaining = math.ceil(retry_at - now) if retry_at is not None else None
                 return batch.model_copy(deep=True, update={
-                    "diagnostics": None, "reused_cache": True, "retry_after_seconds": remaining})
+                    "diagnostics": None, "reused_cache": True, "retry_after_seconds": remaining,
+                    "message": _hitmos_budget_message(remaining) if retry_at is not None else batch.message})
             try:
                 started_at = time.monotonic()
                 document = None
@@ -529,7 +534,7 @@ class HitmosProvider(AudioProvider):
                     document.diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
                 result = DiscoveryBatch(source="hitmos", status="error" if budget_wait is not None and not recordings else "ok",
                     reason="request_budget_exhausted" if budget_wait is not None else "candidates_found" if recordings else "no_results",
-                    message=HITMOS_BUDGET_MESSAGE if budget_wait is not None else
+                    message=_hitmos_budget_message(budget_wait) if budget_wait is not None else
                             "Метаданные найдены; поток будет проверен по Play." if recordings else "Hitmos не вернул кандидатов.",
                     search_url=search_url, recordings=recordings,
                     complete=complete, auto_candidate_id=auto_candidate_id,
@@ -550,7 +555,7 @@ class HitmosProvider(AudioProvider):
                     diag.internal_code = exc.reason
                 result = fallback.model_copy(update={"reason": exc.reason,
                     "status": "error",
-                    "message": HITMOS_BUDGET_MESSAGE if exc.reason == "request_budget_exhausted" else
+                    "message": _hitmos_budget_message(exc.retry_after_seconds) if exc.reason == "request_budget_exhausted" else
                                "Поиск Hitmos недоступен. Можно открыть исходный сайт или повторить позже.",
                     "retry_after_seconds": exc.retry_after_seconds if exc.reason == "request_budget_exhausted" else None,
                     "diagnostics": diag if self.diagnostics_enabled else None})
@@ -655,7 +660,7 @@ class HitmosProvider(AudioProvider):
                     diag.stage = "redirect"
             return SourceResult(source="hitmos", status="error", reason=exc.reason,
                                 stage=exc.stage or "source_metadata",
-                                message=HITMOS_BUDGET_MESSAGE if exc.reason == "request_budget_exhausted" else
+                                message=_hitmos_budget_message(exc.retry_after_seconds) if exc.reason == "request_budget_exhausted" else
                                         "Не удалось получить или прочитать метаданные Hitmos. Сопоставление и воспроизведение ещё не подтверждены. Можно открыть исходную запись.",
                                 search_url=url,
                                 retry_after_seconds=exc.retry_after_seconds if exc.reason == "request_budget_exhausted" else None,

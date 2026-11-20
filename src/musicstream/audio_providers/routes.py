@@ -38,8 +38,10 @@ async def audio_lifespan(app, *, track_credits=None):
     lab_request_limit = max(5, min(30, lab_request_limit))
     hitmos_proxy = HitmosStreamProxy()
     async with httpx.AsyncClient(timeout=5.0, follow_redirects=False, headers={"User-Agent": "MusicStream/0.1.0"}) as client:
-        hitmos_reader = HitmosBrowserReader(diagnostics_enabled=local_diagnostics, lab_mode=lab_mode,
-                                             request_limit=lab_request_limit if lab_mode else 5)
+        hitmos_reader = HitmosBrowserReader(
+            diagnostics_enabled=local_diagnostics, lab_mode=lab_mode,
+            request_limit=lab_request_limit if lab_mode else HitmosBrowserReader.DEFAULT_REQUEST_LIMIT,
+        )
         app.state.audio_providers = {
             "youtube": YouTubeProvider(BoundedSourceClient(client), os.getenv("YOUTUBE_API_KEY", "").strip() or None),
             "hitmos": HitmosProvider(hitmos_reader,

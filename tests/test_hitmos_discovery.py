@@ -563,26 +563,31 @@ def test_browser_search_fetches_query_without_loading_media(monkeypatch):
     async def run():
         reader = HitmosBrowserReader(diagnostics_enabled=True)
         now = [0.]
-        reader._budget = ClientRateLimiter(limit=2, clock=lambda: now[0])
+        reader._budget.clock = lambda: now[0]
         result = await reader.read_search("Rammstein Sonne")
-        await reader.read_search("Rammstein Sonne")
+        now[0] = 1
+        for _ in range(29):
+            await reader.read_search("Rammstein Sonne")
         assert parse_search_ids(result.html) == ["1"]
-        assert visited == [SEARCH, SEARCH]
+        assert visited == [SEARCH] * 30
         page.evaluate.assert_not_called()
         runtime.chromium.launch.assert_awaited_once()
-        assert context.close.await_count == 2
+        assert context.close.await_count == 30
         with pytest.raises(SourceFailure) as denied:
             await reader.read_search("Rammstein Sonne")
         assert (denied.value.reason, denied.value.stage, denied.value.retry_after_seconds) == (
-            "request_budget_exhausted", "source_search", 60)
+            "request_budget_exhausted", "source_search", 59)
         now[0] = 12.5
         with pytest.raises(SourceFailure) as denied:
             await reader.read_song("1")
         assert denied.value.retry_after_seconds == 48
-        assert visited == [SEARCH, SEARCH]
+        assert visited == [SEARCH] * 30
         now[0] = 60
         await reader.read_search("Rammstein Sonne")
-        assert visited == [SEARCH, SEARCH, SEARCH]
+        with pytest.raises(SourceFailure) as denied:
+            await reader.read_search("Rammstein Sonne")
+        assert denied.value.retry_after_seconds == 1
+        assert visited == [SEARCH] * 31
         await reader.close()
         browser.close.assert_awaited_once()
     asyncio.run(run())
@@ -620,9 +625,11 @@ def test_hitmos_budget_wait_preserves_search_and_resumes_card_without_reopening_
         service = SourceSelectionService({"hitmos": provider}, clock=lambda: now[0])
         denied = await service.discover(REF)
         assert denied.reason == "request_budget_exhausted" and denied.retry_after_seconds == 60
+        assert "через 60 с." in denied.sources[0].message
         now[0] = 58
         preparation = await service.prepare(REF, "hitmos", "1")
         assert preparation.retry_after_seconds == 2 and preparation.diagnostics is None
+        assert "через 2 с." in preparation.message
         assert (await service.discover(REF)).retry_after_seconds == 2
         assert not reader.calls
 
@@ -632,6 +639,8 @@ def test_hitmos_budget_wait_preserves_search_and_resumes_card_without_reopening_
         now[0] = 119
         cached = await service.discover(REF)
         assert cached.reused_cache and cached.retry_after_seconds == 1
+        assert cached.candidates == partial.candidates
+        assert "через 1 с." in cached.sources[0].message
         assert reader.calls == [("search", "Rammstein Sonne")]
 
         now[0] = 120
@@ -772,7 +781,9 @@ def test_hitmos_media_hosts_must_resolve_only_to_public_addresses(monkeypatch):
 @pytest.mark.parametrize("app", [local_app, public_app])
 def test_discovery_and_play_use_one_validated_api(app, monkeypatch):
     monkeypatch.delenv("HITMOS_BROWSER_ENABLED", raising=False)
+    monkeypatch.delenv("HITMOS_LAB_MODE", raising=False)
     with TestClient(app) as client:
+        assert app.state.audio_providers["hitmos"].reader._budget.limit == 30
         app.state.audio_providers["hitmos"] = HitmosProvider(Reader())
         params = {"provider": "hitmos", "title": "Sonne", "artist": "Rammstein", "duration_seconds": 272,
                   "explicit_lyrics": False}

@@ -105,8 +105,9 @@ def _host_resolves_publicly(host: str) -> bool:
 
 class HitmosBrowserReader:
     MAX_BYTES = 262144
+    DEFAULT_REQUEST_LIMIT = 30
 
-    def __init__(self, *, diagnostics_enabled=False, lab_mode=False, request_limit=5, proxy_url=None):
+    def __init__(self, *, diagnostics_enabled=False, lab_mode=False, request_limit=DEFAULT_REQUEST_LIMIT, proxy_url=None):
         self._gate = asyncio.Semaphore(1)
         self._budget = ClientRateLimiter(limit=request_limit)
         self.diagnostics_enabled = diagnostics_enabled

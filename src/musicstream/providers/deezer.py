@@ -3,11 +3,44 @@
 import asyncio
 import time
 from collections import OrderedDict
+from collections.abc import Awaitable, Callable
+from typing import TypeVar
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from musicstream.providers.base import ProviderError, SearchProvider, Track
+from musicstream.providers.deezer_query import alternatives, query_terms, relevant
+
+_Results = TypeVar("_Results")
+
+
+async def _search_with_alternatives(
+    query: str,
+    fetch: Callable[[str], Awaitable[_Results]],
+    has_relevant: Callable[[_Results, list[frozenset[str]]], bool],
+) -> _Results:
+    original = await fetch(query)
+    if has_relevant(original, query_terms(query)):
+        return original
+    try:
+        async with asyncio.timeout(4):
+            for alternative in alternatives(query):
+                results = await fetch(alternative)
+                if has_relevant(results, query_terms(alternative)):
+                    return results
+    except (ProviderError, TimeoutError):
+        # The optional fallback must not discard the original Deezer response.
+        pass
+    return original
+
+
+def _tracks_are_relevant(tracks: list[Track], terms: list[frozenset[str]]) -> bool:
+    if any(relevant(terms, track.artist, exact=True) or relevant(terms, track.title, exact=True)
+           or relevant(terms, track.album, exact=True) or relevant(terms, track.artist, track.title, exact=True)
+           for track in tracks):
+        return True
+    return sum(relevant(terms, track.artist, track.title, track.album) for track in tracks) >= 2
 
 
 class _Artist(BaseModel):
@@ -149,13 +182,19 @@ class DeezerProvider(SearchProvider):
                 [credit.name for credit in detail.contributors if credit.role == "Main"])
 
     async def search_artists(self, query: str, limit: int = 10) -> dict:
-        payload = await self._get_json("search/artist", {"q": query, "limit": limit})
-        try:
-            parsed = _ArtistSearchResponse.model_validate(payload)
-        except ValidationError as exc:
-            raise ProviderError("Deezer returned invalid artist search results", 502) from exc
+        parsed = await _search_with_alternatives(
+            query, lambda value: self._search_artists(value, limit),
+            lambda page, terms: any(relevant(terms, item.name, exact=True) for item in page.data),
+        )
         return {"data": [self._artist_dict(item) for item in parsed.data],
                 "total": parsed.total, "has_more": bool(parsed.next)}
+
+    async def _search_artists(self, query: str, limit: int) -> _ArtistSearchResponse:
+        payload = await self._get_json("search/artist", {"q": query, "limit": limit})
+        try:
+            return _ArtistSearchResponse.model_validate(payload)
+        except ValidationError as exc:
+            raise ProviderError("Deezer returned invalid artist search results", 502) from exc
 
     @staticmethod
     def _artist_dict(item: _Artist) -> dict:
@@ -227,6 +266,12 @@ class DeezerProvider(SearchProvider):
                 "rank": item.rank, "source": "deezer"}
 
     async def search(self, query: str, limit: int = 10) -> list[Track]:
+        return await _search_with_alternatives(
+            query, lambda value: self._search_tracks(value, limit),
+            _tracks_are_relevant,
+        )
+
+    async def _search_tracks(self, query: str, limit: int) -> list[Track]:
         try:
             response = await self.client.get(
                 "https://api.deezer.com/search",

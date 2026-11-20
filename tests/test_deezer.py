@@ -52,6 +52,77 @@ def test_deezer_default_and_explicit_mapping(client, selected):
     assert request.extensions["timeout"] == dict.fromkeys(["connect", "read", "write", "pool"], 10.0)
 
 
+@pytest.mark.parametrize(("query", "correction", "artist"), [
+    ("раммштайн", "rammstein", "Rammstein"),
+    ("hfvvinfqy", "rammstein", "Rammstein"),
+    ("металлика", "metallica", "Metallica"),
+    ("vtnfkkbrf", "metallica", "Metallica"),
+    ("линкин парк", "linkin park", "Linkin Park"),
+    ("kbyrby gfhr", "linkin park", "Linkin Park"),
+    ("корн", "korn", "Korn"),
+    ("слипкнот", "slipknot", "Slipknot"),
+    ("пинк флойд", "pink floyd", "Pink Floyd"),
+    ("кфььыеушт", "rammstein", "Rammstein"),
+    ("алекс", "alex", "Alex"),
+])
+@pytest.mark.parametrize("artist_endpoint", [False, True])
+def test_deezer_corrects_irrelevant_searches(client, query, correction, artist, artist_endpoint):
+    api, requests, handlers = client
+    endpoint = "/api/catalog/artists" if artist_endpoint else "/api/search"
+    name_field = "name" if artist_endpoint else "artist"
+
+    def handler(request):
+        value = artist if request.url.params["q"] == correction else "Unrelated"
+        item = {"id": 1, "name": value} if artist_endpoint else {
+            "id": 2, "artist": {"name": value}, "title": "A song"}
+        return httpx.Response(200, json={"data": [item]})
+
+    handlers[0] = handler
+    response = api.get(endpoint, params={"q": query})
+    assert response.status_code == 200
+    payload = response.json()
+    rows = payload["data"] if artist_endpoint else payload
+    assert rows[0][name_field] == artist
+    queries = [request.url.params["q"] for request in requests]
+    assert queries[0] == query and queries[-1] == correction
+    assert 2 <= len(queries) <= 3
+
+
+@pytest.mark.parametrize("query", ["раммштайн Sonne", "hfvvinfqy Sonne", "Rammstein ыщтту"])
+def test_deezer_mixed_query_keeps_the_other_word(client, query):
+    api, requests, handlers = client
+    handlers[0] = lambda request: httpx.Response(200, json={"data":
+        [{"id": 1, "title": "Sonne", "artist": {"name": "Rammstein"}}]
+        if request.url.params["q"].lower() == "rammstein sonne"
+        else [{"id": 2, "title": "Sonne", "artist": {"name": "Other Artist"}}]})
+    response = api.get("/api/search", params={"q": query})
+    assert response.status_code == 200 and response.json()[0]["id"] == "1"
+    assert [request.url.params["q"].lower() for request in requests] == [query.lower(), "rammstein sonne"]
+
+
+@pytest.mark.parametrize(("query", "artist", "title"), [
+    ("Rammstein Sonne", "Rammstein", "Sonne"),
+    ("Кино", "Кино", "Группа крови"),
+    ("раммштайн", "Rammstein", "Sonne"),
+])
+def test_deezer_keeps_relevant_primary_search(client, query, artist, title):
+    api, requests, handlers = client
+    handlers[0] = lambda request: httpx.Response(200, json={"data": [
+        {"id": 1, "title": title, "artist": {"name": artist}},
+    ]})
+    assert api.get("/api/search", params={"q": query}).json()[0]["artist"] == artist
+    assert [request.url.params["q"] for request in requests] == [query]
+
+
+def test_deezer_keeps_primary_results_when_alternatives_are_irrelevant(client):
+    api, requests, handlers = client
+    handlers[0] = lambda request: httpx.Response(200, json={"data": [
+        {"id": 1 if request.url.params["q"] == "vtnfkkbrf" else 2, "title": "Another song"},
+    ]})
+    assert api.get("/api/search", params={"q": "vtnfkkbrf"}).json()[0]["id"] == "1"
+    assert len(requests) == 3
+
+
 @pytest.mark.parametrize("item", [{}, {"artist": None, "album": None, "duration": None,
     "isrc": None, "explicit_lyrics": None, "rank": None}])
 def test_missing_fields_are_null(client, item):

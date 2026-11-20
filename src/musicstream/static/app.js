@@ -1093,6 +1093,15 @@ const musicPlayer = (() => {
   const section = document.querySelector("#playback-section");
   const message = document.querySelector("#source-status");
   const consent = document.querySelector("#youtube-consent");
+  const unknownHitmosExplicit = document.querySelector("#hitmos-unknown-explicit");
+  const unknownHitmosExplicitKey = "musicstream.hitmos.allowUnknownExplicit";
+  try {
+    unknownHitmosExplicit.checked = localStorage.getItem(unknownHitmosExplicitKey) === "true";
+  } catch { /* Keep the default when storage is unavailable. */ }
+  unknownHitmosExplicit.addEventListener("change", () => {
+    try { localStorage.setItem(unknownHitmosExplicitKey, String(unknownHitmosExplicit.checked)); }
+    catch { /* The setting still applies to this page. */ }
+  });
   const source = document.querySelector("#audio-source");
   const candidates = document.querySelector("#source-candidates");
   const reports = document.querySelector("#source-reports");
@@ -1628,8 +1637,19 @@ const musicPlayer = (() => {
       && artist === normalizeHitmosMetadata(comparison.candidate_artist));
   }
 
-  function canAutoPrepareHitmos(track, item) {
+  function isUnknownHitmosExplicit(item) {
+    return item.match?.status === "uncertain" && item.match.explicit_status === "unknown"
+      && item.match.reasons?.length === 1 && item.match.reasons[0] === "explicit_unconfirmed";
+  }
+
+  function canAutoPrepareHitmos(track, item, allowUnknownExplicit = false) {
     const match = item.match;
+    if (match?.explicit_status === "conflicting") return false;
+    if (allowUnknownExplicit) {
+      return track.duration_seconds > 0 && match?.comparison?.candidate_duration_seconds > 0
+        && hasExactHitmosNames(track, match.comparison)
+        && (match.status === "likely" || (unknownHitmosExplicit.checked && isUnknownHitmosExplicit(item)));
+    }
     return match?.status === "likely" || (match?.status === "uncertain"
       && match.reasons?.length === 1 && match.reasons[0] === "duration_unknown"
       && track.duration_seconds > 0 && match.comparison?.candidate_duration_seconds === null
@@ -1874,6 +1894,7 @@ const musicPlayer = (() => {
       return;
     }
     if (failedHitmosId) params.set("exclude_hitmos_id", failedHitmosId);
+    if (unknownHitmosExplicit.checked) params.set("allow_unknown_hitmos_explicit", "true");
     let searchStarted = performance.now();
     let discoveryDiagnostics = null;
     let discoveryReusedCache = false;
@@ -1895,9 +1916,12 @@ const musicPlayer = (() => {
       timing.hitmos_preselection_stream_preparation_ms = Number.isFinite(diagnostics.stream_preparation_elapsed_ms)
         ? diagnostics.stream_preparation_elapsed_ms : 0;
       const discoveredItems = Array.isArray(discovered.candidates) ? discovered.candidates : [];
+      const selectedItem = discoveredItems.find(item => item.source === "hitmos" && item.id === discovered.selected_id);
+      const allowUnknownExplicit = Boolean(selectedItem && isUnknownHitmosExplicit(selectedItem));
       const candidates = discovered.selection === "automatic" && discovered.selected_source === "hitmos"
         ? discoveredItems.filter(item => item.source === "hitmos"
-          && (item.match?.status === "likely" || (item.id === discovered.selected_id && canAutoPrepareHitmos(track, item)))
+          && (item.id === discovered.selected_id ? canAutoPrepareHitmos(track, item, allowUnknownExplicit)
+            : !allowUnknownExplicit && item.match?.status === "likely")
           && /^[0-9]{1,12}$/.test(item.id))
           .sort((left, right) => left.id === discovered.selected_id ? -1 : right.id === discovered.selected_id ? 1
             : (right.match_score || 0) - (left.match_score || 0))
@@ -1939,7 +1963,7 @@ const musicPlayer = (() => {
             + prepared.diagnostics.elapsed_ms;
         }
         const playable = (prepared.candidates || []).find(item => item.id === candidate.id
-          && canAutoPrepareHitmos(track, item) && item.method === "html_audio"
+          && canAutoPrepareHitmos(track, item, allowUnknownExplicit) && item.method === "html_audio"
           && validHitmosStream(item.stream_url, item.id));
         return prepared.status === "available" && playable
           ? { stream: playable, diagnostics: prepared.diagnostics || null, reusedCache: candidateReusedCache }
@@ -1998,10 +2022,12 @@ const musicPlayer = (() => {
         audio_stream_network: "required for playback",
       });
 
-      hitmosPlaybackCache.set(String(track.id), {
-        item: { ...stream, title: track.title, artist: track.artist },
-        expiresAt: Date.now() + 45_000,
-      });
+      if (!isUnknownHitmosExplicit(stream)) {
+        hitmosPlaybackCache.set(String(track.id), {
+          item: { ...stream, title: track.title, artist: track.artist },
+          expiresAt: Date.now() + 45_000,
+        });
+      }
       while (hitmosPlaybackCache.size > 64) hitmosPlaybackCache.delete(hitmosPlaybackCache.keys().next().value);
 
       const context = automaticHitmos;
@@ -2493,6 +2519,9 @@ const musicPlayer = (() => {
     const params = new URLSearchParams({ title: selected.title, artist, provider });
     if (/^[0-9]{1,20}$/.test(String(selected.id))) params.set("deezer_id", String(selected.id));
     if (candidateId) params.set(provider === "hitmos" ? "hitmos_id" : "candidate_id", candidateId);
+    if (!candidateId && provider !== "youtube" && unknownHitmosExplicit.checked) {
+      params.set("allow_unknown_hitmos_explicit", "true");
+    }
     if (provider === "auto") params.set("allow_youtube", String(consent.checked));
     if (typeof selected.duration_seconds === "number") params.set("duration_seconds", String(selected.duration_seconds));
     if (typeof selected.explicit_lyrics === "boolean") params.set("explicit_lyrics", String(selected.explicit_lyrics));
@@ -2538,7 +2567,7 @@ const musicPlayer = (() => {
         const chosen = candidateId ? items.find(item => item.id === candidateId && ["html_audio", "youtube_iframe", "dash_mse"].includes(item.method) && item.match?.status !== "mismatch")
           : result.selection === "automatic" ? items.find(item => item.id === result.selected_id
             && (item.source || result.source) === selectedSource
-            && (selectedSource === "hitmos" ? canAutoPrepareHitmos(selected, item) : item.match?.status === "likely")) : null;
+            && (selectedSource === "hitmos" ? canAutoPrepareHitmos(selected, item, true) : item.match?.status === "likely")) : null;
         const chosenSource = chosen?.source || (candidateId ? provider : selectedSource);
         if (!chosen && provider === "auto" && result.selection === "choose"
             && items.some(item => item.source === "hitmos" && item.match?.status === "likely")) {

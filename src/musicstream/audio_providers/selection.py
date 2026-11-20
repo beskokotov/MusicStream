@@ -22,6 +22,18 @@ def hitmos_missing_duration_match(recording: RecordingReference, candidate: Audi
             and normalize(candidate.artist or "") == normalize(recording.artist))
 
 
+def hitmos_unknown_explicit_match(recording: RecordingReference, candidate: AudioCandidate) -> bool:
+    return (recording.allow_unknown_hitmos_explicit
+            and candidate.source == "hitmos"
+            and candidate.match.status == "uncertain"
+            and candidate.match.explicit_status == "unknown"
+            and candidate.match.reasons == ["explicit_unconfirmed"]
+            and recording.duration_seconds is not None and recording.duration_seconds > 0
+            and candidate.duration_seconds is not None and candidate.duration_seconds > 0
+            and normalize(candidate.title) == normalize(recording.title)
+            and normalize(candidate.artist or "") == normalize(recording.artist))
+
+
 def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceResult:
     if batch.source == "hitmos" and batch.hitmos_artist:
         recording = recording.model_copy(update={"artist": batch.hitmos_artist})
@@ -39,10 +51,11 @@ def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceRe
                                          match_score=round(.6 * title + .3 * artist + .1 * duration, 4)))
     candidates.sort(key=lambda c: ({"likely": 0, "uncertain": 1, "mismatch": 2}[c.match.status], -(c.match_score or 0)))
     eligible = [c for c in candidates if c.match.status != "mismatch"]
-    selected = eligible[0] if (len(eligible) == 1 and batch.complete
+    selected = eligible[0] if (len(eligible) == 1 and batch.complete and not batch.hitmos_manual_selection
                               and (batch.source == "hitmos" or eligible[0].method == "youtube_iframe")
                               and (exact_metadata(recording, eligible[0])
-                                   or hitmos_missing_duration_match(recording, eligible[0]))) else None
+                                   or hitmos_missing_duration_match(recording, eligible[0])
+                                   or hitmos_unknown_explicit_match(recording, eligible[0]))) else None
     for candidate in candidates:
         candidate.selection_reason = ("recording_mismatch" if candidate.match.status == "mismatch" else
                                       "unique_high_confidence" if candidate is selected else "manual_confirmation_required")

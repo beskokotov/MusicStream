@@ -25,10 +25,13 @@ async def main():
     unavailable = (await HitmosProvider(Reader(error="source_http_error")).find(REF)).model_dump()
     missing_duration_provider = HitmosProvider(Reader({"2": ("Sonne", "Rammstein", None)}))
     missing_duration = (await SourceSelectionService({"hitmos": missing_duration_provider}).discover(REF)).model_dump()
+    explicit_provider = HitmosProvider(Reader({"2": ("Sonne", "Rammstein", 272)}))
+    explicit_service = SourceSelectionService({"hitmos": explicit_provider})
     scenario = [automatic]
     requests = []
     serve_audio = False
     omit_duration = False
+    explicit_track = False
     audio_token = "/api/audio/hitmos-stream/" + "A" * 32
     async with async_playwright() as runtime:
         try:
@@ -47,7 +50,7 @@ async def main():
                 url = route.request.url
                 if "/api/search?" in url:
                     return await route.fulfill(json=[{"id": "1", "title": "Sonne", "artist": "Rammstein",
-                        "duration_seconds": 272, "explicit_lyrics": False, "source": "deezer"}])
+                        "duration_seconds": 272, "explicit_lyrics": explicit_track, "source": "deezer"}])
                 if "/api/audio/resolve?" in url:
                     requests.append(url)
                     params = parse_qs(urlsplit(url).query)
@@ -55,11 +58,18 @@ async def main():
                         song_id = params["hitmos_id"][0]
                         if song_id == "1":
                             return await route.abort("failed")
-                        source_provider = missing_duration_provider if omit_duration else provider
-                        prepared = await source_provider.lookup(REF, song_id)
+                        source_provider = (explicit_provider if explicit_track else
+                                           missing_duration_provider if omit_duration else provider)
+                        prepared = await source_provider.lookup(REF.model_copy(update={"explicit_lyrics": explicit_track}), song_id)
                         if serve_audio:
                             prepared.candidates[0].stream_url = audio_token
                         return await route.fulfill(json=prepared.model_dump())
+                    if explicit_track:
+                        ranked = await explicit_service.discover(REF.model_copy(update={
+                            "explicit_lyrics": True,
+                            "allow_unknown_hitmos_explicit": params.get("allow_unknown_hitmos_explicit") == ["true"],
+                        }))
+                        return await route.fulfill(json=ranked.model_dump())
                     if serve_audio:
                         await asyncio.sleep(.160)
                     return await route.fulfill(json=scenario[0])
@@ -192,6 +202,31 @@ async def main():
             await wait_for_playing()
             assert len(requests) == 2
             assert "provider=auto" in requests[0] and "hitmos_id=2" in requests[1]
+
+            explicit_track = True
+            await select_after_reload()
+            choice = page.get_by_role("button", name="Подтвердить запись и воспроизвести")
+            await choice.wait_for()
+            preference = page.locator("#hitmos-unknown-explicit")
+            assert not await preference.is_checked()
+            await preference.check()
+            timings.clear()
+            await select_after_reload()
+            await wait_for_playing()
+            assert await preference.is_checked()
+            assert json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))["explicit"] is False
+            if not await preference.is_visible():
+                await page.locator("#developer-mode summary").first.click()
+            await preference.uncheck()
+            await select_after_reload()
+            await choice.click()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('is-playing')")
+            assert json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))["user_confirmed"] is True
+            requests.clear()
+            timings.clear()
+            await select_after_reload()
+            await wait_for_playing()
+            assert len(requests) == 1 and "hitmos_id=2" in requests[0]
             assert not errors, errors
             print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:

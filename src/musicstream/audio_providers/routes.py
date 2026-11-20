@@ -141,12 +141,15 @@ async def resolve_audio(
     allow_youtube: bool = False,
     deezer_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,20}$")] = None,
     exclude_hitmos_id: Annotated[str | None, Query(pattern=r"^[0-9]{1,12}$")] = None,
+    allow_unknown_hitmos_explicit: bool = False,
 ):
     peer = request.client.host if request.client else "unknown"
     cache_key = (title.strip(), artist.strip(), duration_seconds, explicit_lyrics,
-                 provider, hitmos_id or candidate_id, allow_youtube, deezer_id, exclude_hitmos_id)
+                 provider, hitmos_id or candidate_id, allow_youtube, deezer_id, exclude_hitmos_id,
+                 allow_unknown_hitmos_explicit)
     cache = request.app.state.audio_response_cache
-    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id", "exclude_hitmos_id"}
+    if (set(request.query_params) - {"title", "artist", "duration_seconds", "explicit_lyrics", "provider", "hitmos_id", "candidate_id", "allow_youtube", "deezer_id", "exclude_hitmos_id", "allow_unknown_hitmos_explicit"}
+            or (allow_unknown_hitmos_explicit and (provider == "youtube" or hitmos_id or candidate_id))
             or (exclude_hitmos_id is not None and provider != "auto")
             or not title.strip() or not artist.strip() or (hitmos_id and provider != "hitmos")
             or (hitmos_id and candidate_id)
@@ -164,7 +167,8 @@ async def resolve_audio(
         if provider == "auto":
             recording = RecordingReference(title=title.strip(), artist=artist.strip(),
                                            duration_seconds=duration_seconds,
-                                           explicit_lyrics=explicit_lyrics, deezer_id=deezer_id)
+                                           explicit_lyrics=explicit_lyrics, deezer_id=deezer_id,
+                                           allow_unknown_hitmos_explicit=allow_unknown_hitmos_explicit)
             return await request.app.state.source_selection.discover(
                 recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)
         return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
@@ -172,7 +176,8 @@ async def resolve_audio(
     if retry_after:
         raise HTTPException(429, "Source lookup limit reached", headers={"Retry-After": str(retry_after)})
     recording = RecordingReference(title=title.strip(), artist=artist.strip(), duration_seconds=duration_seconds,
-                                   explicit_lyrics=explicit_lyrics, deezer_id=deezer_id)
+                                   explicit_lyrics=explicit_lyrics, deezer_id=deezer_id,
+                                   allow_unknown_hitmos_explicit=allow_unknown_hitmos_explicit)
     try:
         operation_timeout = (30 if getattr(request.app.state, "hitmos_lab_mode", False) and (hitmos_id or candidate_id)
                              else 15 if provider == "auto" or (provider == "hitmos" and not (hitmos_id or candidate_id))

@@ -60,18 +60,20 @@ def find(reader, reference=REF):
     return asyncio.run(HitmosProvider(reader).find(reference))
 
 
-@pytest.mark.parametrize(("primary_has_match", "second_request", "page_title", "selection", "state"), [
-    (True, False, "FIX UR FACE", "automatic", "unknown"),
-    (False, True, "FIX UR FACE", "choose", "unknown"),
-    (False, True, "FIX UR FACE Clean", "choose", "conflicting"),
+@pytest.mark.parametrize(("primary_has_match", "second_request", "page_title", "allowed", "selection", "state"), [
+    (True, False, "FIX UR FACE", False, "automatic", "unknown"),
+    (False, True, "FIX UR FACE", False, "choose", "unknown"),
+    (False, True, "FIX UR FACE", True, "automatic", "unknown"),
+    (False, True, "FIX UR FACE Clean", True, "choose", "conflicting"),
 ])
-def test_deezer_credits_requested_only_for_missing_hitmos_match(primary_has_match, second_request, page_title, selection, state):
+def test_deezer_credits_requested_only_for_missing_hitmos_match(primary_has_match, second_request, page_title, allowed, selection, state):
     async def run():
         title = "FIX UR FACE"
         artist = "Machine Gun Kelly"
         names = artist + ", Fred Durst"
         ref = RecordingReference(title=title, artist=artist, duration_seconds=199,
-                                 explicit_lyrics=not primary_has_match, deezer_id="3963695871")
+                                 explicit_lyrics=not primary_has_match, deezer_id="3963695871",
+                                 allow_unknown_hitmos_explicit=allowed)
         credits = AsyncMock(return_value=(title, artist, 199, [artist, "Fred Durst"]))
 
         class CoartistReader(Reader):
@@ -88,7 +90,8 @@ def test_deezer_credits_requested_only_for_missing_hitmos_match(primary_has_matc
         service = SourceSelectionService({"hitmos": HitmosProvider(reader, track_credits=credits)})
         result = await service.discover(ref)
         assert result.selection == selection
-        assert result.selected_id == ("1" if primary_has_match else None)
+        expected_id = ("1" if primary_has_match else "82065078") if selection == "automatic" else None
+        assert result.selected_id == expected_id
         assert [call[1] for call in reader.calls if call[0] == "search"] == (
             [f"{artist} {title}", f"Fred Durst {title}"] if second_request else [f"{artist} {title}"])
         if second_request:
@@ -104,6 +107,25 @@ def test_deezer_credits_requested_only_for_missing_hitmos_match(primary_has_matc
         await service.discover(ref)
         assert credits.await_count == int(second_request)
 
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize(("title", "duration", "count", "expected"), [
+    ("Ich will", 217, 1, "automatic"),
+    ("Ich will", None, 1, "choose"),
+    ("Ich will", 300, 1, "choose"),
+    ("Engel", 263, 2, "choose"),
+    ("Engel", 263, 6, "choose"),
+])
+def test_unknown_explicit_requires_complete_and_unique_hitmos_match(title, duration, count, expected):
+    async def run():
+        ref = RecordingReference(title=title, artist="Rammstein", duration_seconds=218 if title == "Ich will" else 263,
+                                 explicit_lyrics=True, allow_unknown_hitmos_explicit=True)
+        reader = Reader({str(index): (title, "Rammstein", duration) for index in range(1, count + 1)})
+        provider = HitmosProvider(reader)
+        service = SourceSelectionService({"hitmos": provider})
+        assert (await provider.find(ref)).selection == expected
+        assert (await service.discover(ref)).selection == expected
     asyncio.run(run())
 
 

@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 
 from musicstream.audio_providers.base import DiscoveryBatch, ProviderSummary, RecordingReference, SourceResult
 from musicstream.audio_providers.hitmos import valid_stream_url
-from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, rank_batch
+from musicstream.audio_providers.selection import exact_metadata, hitmos_missing_duration_match, hitmos_unknown_explicit_match, rank_batch
 from musicstream.audio_providers.matching import normalize, versions
 
 logger = logging.getLogger(__name__)
@@ -165,7 +165,8 @@ class SourceSelectionService:
             chosen = (eligible[0] if (len(eligible) == 1 and complete
                                       and (eligible[0].source == "hitmos" or eligible[0].method == "youtube_iframe")
                                       and (exact_metadata(reference, eligible[0])
-                                           or hitmos_missing_duration_match(reference, eligible[0])))
+                                           or hitmos_missing_duration_match(reference, eligible[0])
+                                           or hitmos_unknown_explicit_match(reference, eligible[0])))
                       else equivalent_group[0] if equivalent_group and not require_unique_hitmos
                       and not any(batch.status == "error" for batch in batches) else None)
         if chosen and chosen.source == "hitmos" and hitmos_batch.hitmos_manual_selection:

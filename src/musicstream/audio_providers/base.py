@@ -67,6 +67,7 @@ class RecordingReference(BaseModel):
     # Deezer false means only "not flagged"; it does not prove a clean master.
     explicit_lyrics: bool | None = None
     deezer_id: str | None = Field(default=None, pattern=r"^[0-9]{1,20}$")
+    allow_unknown_hitmos_explicit: bool = False
 
 
 class RecordingComparison(BaseModel):

@@ -113,9 +113,9 @@ function setTilePlaybackState(trackId, playbackState) {
   }
 }
 
-function selectTrack(track, row) {
+function selectTrack(track, row, lineup, index, advance = false) {
   const trackId = String(track.id);
-  if (!musicPlayer.select(track)) return;
+  const started = musicPlayer.select(track, lineup, index, advance);
   if (selectedTrackId !== trackId) setTilePlaybackState(selectedTrackId, "idle");
   selectedTrackId = trackId;
   document.querySelectorAll(".track-row").forEach(item => {
@@ -123,6 +123,7 @@ function selectTrack(track, row) {
     item.classList.toggle("selected", selected);
     item.querySelector(".track-tile").setAttribute("aria-pressed", String(selected));
   });
+  if (!started) return;
   setTilePlaybackState(trackId, "loading");
   document.querySelector("#player-title").textContent = track.title || "Без названия";
   document.querySelector("#player-artist").textContent = track.artist || "Исполнитель неизвестен";
@@ -132,6 +133,7 @@ function selectTrack(track, row) {
 }
 
 function render(tracks) {
+  const lineup = { tracks, list };
   const fragment = document.createDocumentFragment();
   tracks.forEach((track, index) => {
     const row = template.content.firstElementChild.cloneNode(true);
@@ -149,7 +151,8 @@ function render(tracks) {
     album.title = album.textContent;
     row.querySelector(".track-duration").textContent = duration(track.duration_seconds);
     tile.setAttribute("aria-label", `\u0412\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0441\u0442\u0438 ${title} \u2014 ${artist}, ${duration(track.duration_seconds)}`);
-    tile.addEventListener("click", () => selectTrack(track, row));
+    tile.addEventListener("click", () => selectTrack(track, row, lineup, index));
+    row.dataset.queueIndex = index;
     addCover(row.querySelector(".track-cover"), track.cover_url);
     if (id === selectedTrackId) {
       row.classList.add("selected");
@@ -450,7 +453,7 @@ function makeReleaseCard(release) {
   return button;
 }
 
-function appendCatalogTracks(target, tracks, offset = 0, ranking = false) {
+function appendCatalogTracks(target, tracks, offset = 0, ranking = false, lineup = { tracks, list: target }) {
   const fragment = document.createDocumentFragment();
   tracks.forEach((track, i) => {
     const row = template.content.firstElementChild.cloneNode(true);
@@ -463,7 +466,8 @@ function appendCatalogTracks(target, tracks, offset = 0, ranking = false) {
     row.querySelector(".track-album").textContent = track.album || "";
     row.querySelector(".track-duration").textContent = duration(track.duration_seconds);
     tile.setAttribute("aria-label", `Воспроизвести ${track.title || "без названия"} — ${track.artist || "исполнитель неизвестен"}, ${duration(track.duration_seconds)}`);
-    tile.addEventListener("click", () => selectTrack(track, row));
+    tile.addEventListener("click", () => selectTrack(track, row, lineup, offset + i));
+    row.dataset.queueIndex = offset + i;
     addCover(row.querySelector(".track-cover"), track.cover_url);
     if (id === selectedTrackId) {
       row.classList.add("selected");
@@ -691,7 +695,8 @@ function renderArtistTracksPage() {
       const pageSize = 60;
       const pageCount = Math.max(1, Math.ceil(ranked.length / pageSize));
       state.rankedPage = Math.min(state.rankedPage || 0, pageCount - 1);
-      appendCatalogTracks(list, ranked.slice(state.rankedPage * pageSize, (state.rankedPage + 1) * pageSize), state.rankedPage * pageSize, true);
+      appendCatalogTracks(list, ranked.slice(state.rankedPage * pageSize, (state.rankedPage + 1) * pageSize),
+        state.rankedPage * pageSize, true, { tracks: ranked, list });
       section.append(rankedHeading, list);
       appendTrackPageControls(section, state, "rankedPage", ranked.length, pageSize);
     }
@@ -708,7 +713,7 @@ function renderArtistTracksPage() {
       const pageCount = Math.max(1, Math.ceil(unranked.length / pageSize));
       state.unrankedPage = Math.min(state.unrankedPage || 0, pageCount - 1);
       const start = state.unrankedPage * pageSize;
-      appendCatalogTracks(list, unranked.slice(start, start + pageSize), start, true);
+      appendCatalogTracks(list, unranked.slice(start, start + pageSize), start, true, { tracks: unranked, list });
       list.querySelectorAll(".track-number").forEach(number => { number.textContent = "\u2014"; });
       section.append(unrankedHeading, unrankedNote, list);
       appendTrackPageControls(section, state, "unrankedPage", unranked.length, pageSize);
@@ -1033,23 +1038,38 @@ async function openAlbum(id, pushState = false) {
     info.append(h1, meta); header.append(cover, info);
     const section = catalogSection("Трек-лист Deezer", `ID альбома ${album.id}`);
     const trackList = document.createElement("ol"); trackList.className = "track-list catalog-track-list";
-    (page.data || []).forEach(track => { if (!track.album) track.album = album.title; if (!track.cover_url) track.cover_url = album.cover_url; if (!track.artist) track.artist = album.artist; });
-    appendCatalogTracks(trackList, page.data || []);
+    const lineup = { tracks: [], list: trackList, loadMore: null };
+    function appendAlbumTracks(tracks) {
+      tracks.forEach(track => { if (!track.album) track.album = album.title; if (!track.cover_url) track.cover_url = album.cover_url; if (!track.artist) track.artist = album.artist; });
+      appendCatalogTracks(trackList, tracks, lineup.tracks.length, false, lineup);
+      lineup.tracks.push(...tracks);
+    }
+    appendAlbumTracks(page.data || []);
     section.append(trackList);
     const actions = document.createElement("div"); actions.className = "catalog-actions";
     if (page.has_more) {
-      let offset = (page.data || []).length;
+      let loading;
       const more = document.createElement("button"); more.type = "button"; more.className = "catalog-more"; more.textContent = "Загрузить следующий фрагмент";
-      more.addEventListener("click", async () => {
+      lineup.loadMore = () => {
+        if (loading) return loading;
         more.disabled = true;
-        try {
-          const next = await catalogFetch(`/api/catalog/albums/${id}/tracks?index=${offset}&limit=${catalogPageSize}`, signal);
-          (next.data || []).forEach(track => { if (!track.album) track.album = album.title; if (!track.cover_url) track.cover_url = album.cover_url; if (!track.artist) track.artist = album.artist; });
-          appendCatalogTracks(trackList, next.data || [], offset);
-          offset += (next.data || []).length;
-          more.disabled = !next.has_more;
-          more.textContent = next.has_more ? "Загрузить следующий фрагмент" : "Трек-лист завершён";
-        } catch (error) { if (error.name !== "AbortError") { status.textContent = error.message; more.disabled = false; } }
+        // The active album queue can outlive the catalog view.
+        loading = catalogFetch(`/api/catalog/albums/${id}/tracks?index=${lineup.tracks.length}&limit=${catalogPageSize}`)
+          .then(next => {
+            const tracks = next.data || [];
+            appendAlbumTracks(tracks);
+            if (!next.has_more || !tracks.length) lineup.loadMore = null;
+            more.textContent = lineup.loadMore ? "Загрузить следующий фрагмент" : "Трек-лист завершён";
+          }).finally(() => {
+            loading = null;
+            more.disabled = !lineup.loadMore;
+            musicPlayer.refreshQueue(lineup);
+          });
+        return loading;
+      };
+      more.addEventListener("click", async () => {
+        try { await lineup.loadMore?.(); }
+        catch (error) { status.textContent = error.message; }
       });
       actions.append(more);
     }
@@ -1110,6 +1130,8 @@ const musicPlayer = (() => {
   const reports = document.querySelector("#source-reports");
   const frameArea = document.querySelector("#youtube-frame-area");
   const play = document.querySelector("#player-play");
+  const previous = document.querySelector("#player-previous");
+  const next = document.querySelector("#player-next");
   const seek = document.querySelector("#player-seek");
   const bufferedVisual = document.querySelector("#player-buffered");
   const heardVisual = document.querySelector("#player-heard");
@@ -1214,6 +1236,9 @@ const musicPlayer = (() => {
   let preparedSource = null;
   let selected, player, request, polling, apiPromise, frameTimer;
   let generation = 0;
+  let queue = null;
+  let queueIndex = -1;
+  let queueAdvance = null;
   let ready = false;
   let seekDragging = false;
   let bufferedRangesKey = "";
@@ -1244,6 +1269,72 @@ const musicPlayer = (() => {
     });
   }
 
+  function queuePosition() {
+    if (!queue || !ready || playbackTestActive) return 0;
+    if (activeKind === "hitmos" || activeKind === "torrent") return audio.currentTime;
+    return activeKind === "youtube" ? player?.getCurrentTime?.() || 0 : 0;
+  }
+
+  function hasNextTrack() {
+    return Boolean(queue && (queue.tracks[queueIndex + 1] || queue.loadMore));
+  }
+
+  function refreshQueueControls() {
+    previous.disabled = queueIndex < 1 && queuePosition() <= 3;
+    next.disabled = Boolean(queueAdvance) || !hasNextTrack();
+  }
+
+  function selectQueuedTrack(lineup, index) {
+    const track = lineup.tracks[index];
+    const row = lineup.list.isConnected && [...lineup.list.children].find(item =>
+      Number(item.dataset.queueIndex) === index && item.dataset.trackId === String(track.id));
+    selectTrack(track, row || null, lineup, index, true);
+  }
+
+  async function moveQueue(offset) {
+    if (!queue) return;
+    const lineup = queue;
+    const index = queueIndex + offset;
+    if (!lineup.tracks[index]) {
+      if (offset !== 1 || !lineup.loadMore || queueAdvance) return;
+      const current = generation;
+      const advance = {};
+      queueAdvance = advance;
+      refreshQueueControls();
+      try {
+        await lineup.loadMore();
+        if (queueAdvance !== advance || current !== generation) return;
+        if (lineup.tracks[index]) selectQueuedTrack(lineup, index);
+        else if (audio.ended) message.textContent = "Очередь воспроизведения завершена.";
+      } catch {
+        if (queueAdvance === advance && current === generation) {
+          document.querySelector("#developer-mode").open = true;
+          message.textContent = "Не удалось загрузить следующие треки альбома. Нажмите «Вперёд», чтобы повторить.";
+        }
+      } finally {
+        if (queueAdvance === advance) {
+          queueAdvance = null;
+          refreshQueueControls();
+        }
+      }
+      return;
+    }
+    selectQueuedTrack(lineup, index);
+  }
+
+  function resumeAudio() {
+    const current = generation;
+    audio.play().catch(error => {
+      if (current === generation && error.name !== "AbortError") audioFailure(error.name);
+    });
+  }
+
+  function toggleAudio() {
+    if (activeKind === "torrent") torrentShouldResume = audio.paused;
+    if (audio.paused) resumeAudio();
+    else audio.pause();
+  }
+
   function controls(enabled) {
     ready = enabled;
     play.disabled = !enabled;
@@ -1251,10 +1342,12 @@ const musicPlayer = (() => {
     seek.disabled = true;
     play.textContent = "▶";
     play.setAttribute("aria-label", activeKind === "dash" ? "Play DASH audio" : activeKind === "torrent" ? "Play audio" : activeKind === "hitmos" ? "Play Hitmos audio" : "Play YouTube video");
+    refreshQueueControls();
   }
 
   function stop() {
     generation += 1;
+    queueAdvance = null;
     playingHitmosMatch = null;
     seekDragging = false;
     if (automaticHitmos?.timer) clearTimeout(automaticHitmos.timer);
@@ -1314,7 +1407,7 @@ const musicPlayer = (() => {
     if (activeKind === "dash") void dashAdapter.destroy();
     clearInterval(polling);
     clearTimeout(frameTimer);
-    playbackState.textContent = "Недоступно";
+    playbackState.textContent = hasNextTrack() ? "Недоступно · можно перейти дальше" : "Недоступно";
     message.textContent = stage ? `Этап: ${stageLabels[stage] || stage}. ${text}` : text;
     if (diagnosticsEnabled && stage) {
       // Only explicit non-sensitive facts; never log event/error objects or src.
@@ -1388,6 +1481,7 @@ const musicPlayer = (() => {
   }
 
   function updateProgress() {
+    refreshQueueControls();
     const usesAudio = ["hitmos", "torrent", "dash"].includes(activeKind);
     if (!ready || (!usesAudio && !player?.getCurrentTime)) {
       clearProgressVisuals();
@@ -1817,7 +1911,7 @@ const musicPlayer = (() => {
     }
   }
 
-  async function prepareAutomaticPlayback(failedHitmosId = null, startedAt = performance.now()) {
+  async function prepareAutomaticPlayback(failedHitmosId = null, startedAt = performance.now(), reusePlaybackUrl = true) {
     if (!selected) return;
     stop();
     renderSourceDiagnostics();
@@ -1829,7 +1923,7 @@ const musicPlayer = (() => {
     automaticHitmos = { startedAt, current, track, timer: null, phase: "search" };
     const savedMatch = failedHitmosId ? null : readHitmosMatch(track);
     const cachedPlayback = hitmosPlaybackCache.get(String(track.id));
-    if (!tryMatchingCandidates && !savedMatch && !failedHitmosId && cachedPlayback && cachedPlayback.expiresAt > Date.now()) {
+    if (reusePlaybackUrl && !tryMatchingCandidates && !savedMatch && !failedHitmosId && cachedPlayback && cachedPlayback.expiresAt > Date.now()) {
       renderSourceDiagnostics(null, {
         cache_status: "Hitmos playback URL reused from client cache",
         source_search_network: "not performed; source URL reused from client cache",
@@ -2353,7 +2447,7 @@ const musicPlayer = (() => {
     automaticHitmos.timing.hitmos_first_audio_response_ms = Math.round(performance.now() - automaticHitmos.startedAt);
   });
   audio.addEventListener("pause", () => {
-    if (!["hitmos", "torrent", "dash"].includes(activeKind) || !ready) return;
+    if (!["hitmos", "torrent", "dash"].includes(activeKind) || !ready || !audio.paused || audio.ended) return;
     if (selected?.id != null && trackPlaybackStates.get(String(selected.id)) === "error") return;
     setTilePlaybackState(selected?.id, automaticHitmos ? "loading" : "paused");
     if (activeKind === "torrent") {
@@ -2398,6 +2492,7 @@ const musicPlayer = (() => {
     }
   });
   audio.addEventListener("ended", () => {
+    if (!audio.ended || audio.error) return;
     if (activeKind === "torrent") {
       torrentShouldResume = false;
       clearInterval(torrentKeepalive);
@@ -2408,7 +2503,6 @@ const musicPlayer = (() => {
       setTilePlaybackState(selected?.id, "idle");
       play.textContent = "▶";
       play.setAttribute("aria-label", "Воспроизвести аудио");
-      return;
     }
     if (activeKind === "hitmos") {
       playbackState.textContent = "Завершено · Hitmos";
@@ -2423,6 +2517,11 @@ const musicPlayer = (() => {
       play.textContent = "Play";
       play.setAttribute("aria-label", "Play DASH audio");
     }
+    if (queue && !playbackTestActive && ["hitmos", "torrent"].includes(activeKind)) {
+      if (hasNextTrack()) void moveQueue(1);
+      else message.textContent = "Очередь воспроизведения завершена.";
+    }
+    refreshQueueControls();
   });
   audio.addEventListener("progress", updateProgress);
   audio.addEventListener("waiting", audioWaiting);
@@ -2747,6 +2846,25 @@ const musicPlayer = (() => {
     if ((isHitmos || isAuto || consent.checked) && selected && !demoMode) resolveSource();
   }
   source.addEventListener("change", sourceChanged);
+  next.addEventListener("click", () => void moveQueue(1));
+  previous.addEventListener("click", () => {
+    if (queuePosition() <= 3) {
+      void moveQueue(-1);
+      return;
+    }
+    queueAdvance = null;
+    if (activeKind === "youtube") {
+      player.seekTo(0, true);
+      player.playVideo();
+    } else if (activeKind === "torrent" && audio.ended) {
+      selectQueuedTrack(queue, queueIndex);
+    } else {
+      audio.currentTime = 0;
+      if (activeKind === "torrent") torrentShouldResume = true;
+      if (audio.paused) resumeAudio();
+    }
+    refreshQueueControls();
+  });
   play.addEventListener("click", () => {
     if (source.value === "auto" && selected
         && activeKind !== "torrent" && activeKind !== "hitmos") {
@@ -2759,13 +2877,7 @@ const musicPlayer = (() => {
     }
     if (!ready) return;
     if (["hitmos", "torrent", "dash"].includes(activeKind)) {
-      if (!audio.paused) {
-        if (activeKind === "torrent") torrentShouldResume = false;
-        audio.pause();
-      } else {
-        if (activeKind === "torrent") torrentShouldResume = true;
-        audio.play().catch(error => audioFailure(error.name));
-      }
+      toggleAudio();
       return;
     }
     if (!player) return;
@@ -2811,19 +2923,26 @@ const musicPlayer = (() => {
   }
 
   return {
-    select(track) {
-      const sameTrack = selected?.id != null && String(selected.id) === String(track.id);
+    refreshQueue(lineup) {
+      if (lineup === queue) refreshQueueControls();
+    },
+    select(track, lineup, index, advance) {
+      const sameTrack = !advance && selected?.id != null && track.source === selected.source
+        && String(selected.id) === String(track.id);
       if (sameTrack) {
-        if (automaticHitmos?.current === generation) return false;
-        if ((activeKind === "hitmos" || activeKind === "torrent") && ready) {
-          if (audio.ended) audio.currentTime = 0;
-          if (audio.paused) audio.play().catch(error => audioFailure(error.name));
+        if (automaticHitmos?.current === generation || section.getAttribute("aria-busy") === "true") return false;
+        if ((activeKind === "hitmos" || activeKind === "torrent") && ready && !playbackTestActive) {
+          if (!audio.ended && !audio.error) toggleAudio();
           return false;
         }
         if (activeKind === "youtube" && player) {
           if (player.getPlayerState() !== 1) player.playVideo();
           return false;
         }
+        if (preparedSource || candidates.childElementCount || source.value !== "auto") return false;
+      } else {
+        queue = lineup;
+        queueIndex = index;
       }
       stop();
       selected = track;
@@ -2838,7 +2957,7 @@ const musicPlayer = (() => {
       hitmosLink.hidden = true;
       document.querySelector("#hitmos-url").value = "";
       setTilePlaybackState(track.id, "loading");
-      prepareAutomaticPlayback();
+      prepareAutomaticPlayback(null, performance.now(), !advance);
       return true;
     },
   };

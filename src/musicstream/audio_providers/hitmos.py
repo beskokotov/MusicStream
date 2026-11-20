@@ -223,6 +223,7 @@ class HitmosProvider(AudioProvider):
         self._search_gate = asyncio.Semaphore(1)
         self._search_cache = OrderedDict()
         self._prepared_cache = OrderedDict()
+        self._preparing = {}
         self._clock = time.monotonic
 
     async def find(self, recording: RecordingReference) -> SourceResult:
@@ -242,6 +243,8 @@ class HitmosProvider(AudioProvider):
 
     async def prepare(self, recording: RecordingReference, candidate_id: str) -> SourceResult:
         key = self._prepared_key(recording, candidate_id)
+        while (pending := self._preparing.get(key)) is not None:
+            await pending.wait()
         now = self._clock()
         for expired in [key for key, (until, _) in self._prepared_cache.items() if until <= now]:
             del self._prepared_cache[expired]
@@ -249,11 +252,16 @@ class HitmosProvider(AudioProvider):
         if cached:
             self._prepared_cache.move_to_end(key)
             return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
-        result = await self.lookup(recording, candidate_id)
-        if result.reason != "request_budget_exhausted":
-            self._cache_prepared(recording, candidate_id, result,
-                                 45 if result.status == "available" else 15)
-        return result
+        pending = self._preparing[key] = asyncio.Event()
+        try:
+            result = await self.lookup(recording, candidate_id)
+            if result.reason != "request_budget_exhausted":
+                self._cache_prepared(recording, candidate_id, result,
+                                     45 if result.status == "available" else 15)
+            return result
+        finally:
+            del self._preparing[key]
+            pending.set()
 
     @staticmethod
     def _prepared_key(recording: RecordingReference, candidate_id: str):

@@ -378,6 +378,30 @@ def test_search_embedded_track_metadata_is_used_without_page_navigation():
     assert parse_search_metadata(html, ["91"]) == {"91": ("Sonne", "Rammstein", 272)}
 
 
+def test_hitmos_concurrent_preparations_reuse_one_card():
+    async def run():
+        started, release = asyncio.Event(), asyncio.Event()
+
+        class SlowReader(Reader):
+            async def read_song(self, song_id, *, metadata_only=False):
+                started.set()
+                await release.wait()
+                return await super().read_song(song_id, metadata_only=metadata_only)
+
+        reader = SlowReader()
+        provider = HitmosProvider(reader)
+        first = asyncio.create_task(provider.prepare(REF, "1"))
+        await started.wait()
+        second = asyncio.create_task(provider.prepare(REF, "1"))
+        await asyncio.sleep(0)
+        release.set()
+        original, reused = await asyncio.gather(first, second)
+        assert reader.calls == [("1", False)]
+        assert original.status == reused.status == "available" and reused.reused_cache
+
+    asyncio.run(run())
+
+
 def test_hitmos_search_parses_html_once_for_ids_and_metadata(monkeypatch):
     songs = {str(i): ("Sonne", "Rammstein", 271 + i) for i in range(1, 7)}
     document = asyncio.run(Reader(songs).read_search("Rammstein Sonne"))

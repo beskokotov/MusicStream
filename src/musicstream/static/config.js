@@ -3,4 +3,5 @@
 window.MUSICSTREAM_CONFIG = Object.freeze({
   apiBaseUrl: "",
   demoMode: false,
+  hitmosNextPreparation: true,
 });

@@ -1,4 +1,5 @@
 import asyncio
+import json
 from itertools import groupby
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -16,6 +17,8 @@ from test_hitmos_discovery import Reader
 
 @pytest.mark.parametrize("scenario", [
     "navigation", "late_response", "album_and_failure", "tile_toggle",
+    "prefetch_ready", "prefetch_cancelled", "prefetch_budget", "prefetch_expired", "prefetch_error", "prefetch_next",
+    "prefetch_pending_end",
 ])
 def test_playback_queue_in_chrome(scenario):
     asyncio.run(check_queue(scenario))
@@ -48,6 +51,10 @@ async def check_queue(scenario):
     pending_search = asyncio.Event()
     release_search = asyncio.Event()
     search_finished = asyncio.Event()
+    prefetch = scenario.startswith("prefetch_")
+    saved = json.dumps({"songId": "12", "title": "queue track 2", "artist": "queue artist",
+                        "duration": 170, "sourceDuration": 170, "explicit": None})
+    prefetch_requests = []
     lookups, media_requests, album_pages, page_errors = [], [], [], []
     search_failure = False
     broken_audio = scenario == "album_and_failure"
@@ -65,6 +72,24 @@ async def check_queue(scenario):
         elif path == "/api/audio/resolve":
             track_id = params["deezer_id"][0]
             candidate_id = params.get("hitmos_id", [None])[0]
+            if prefetch and params.get("hitmos_trial") == ["true"]:
+                prefetch_requests.append((track_id, candidate_id))
+                if scenario in {"prefetch_cancelled", "prefetch_pending_end"}:
+                    pending_search.set()
+                    await release_search.wait()
+                    try:
+                        await route.fulfill(json=preparations[track_id])
+                    except Error:
+                        pass
+                    finally:
+                        search_finished.set()
+                elif scenario == "prefetch_budget":
+                    await route.fulfill(json={"reason": "request_budget_exhausted", "retry_after_seconds": 10})
+                elif scenario == "prefetch_error":
+                    await route.fulfill(status=429)
+                else:
+                    await route.fulfill(json=preparations[track_id])
+                return
             lookups.append((track_id, candidate_id))
             if candidate_id:
                 await route.fulfill(json=preparations[track_id])
@@ -116,6 +141,9 @@ async def check_queue(scenario):
         try:
             page = await browser.new_page()
             page.on("pageerror", lambda error: page_errors.append(str(error)))
+            if prefetch:
+                await page.add_init_script(
+                    f"localStorage.setItem('musicstream.hitmos.match.v1.2', {json.dumps(saved)})")
             await page.route("**/*", route_handler)
             await page.goto(origin + "/app")
             audio = page.locator("#hitmos-audio")
@@ -156,7 +184,58 @@ async def check_queue(scenario):
             await row(1).locator("button").click()
             await playing(1)
 
-            if scenario == "navigation":
+            if scenario == "prefetch_cancelled":
+                await asyncio.wait_for(pending_search.wait(), 5)
+                assert media_requests == ["1"]
+                await open_album()
+                await page.get_by_role("button", name="Загрузить следующий фрагмент").click()
+                await row(3).locator("button").click()
+                await playing(3)
+                release_search.set()
+                await asyncio.wait_for(search_finished.wait(), 5)
+                assert prefetch_requests == [("2", "12")]
+                assert all(track_id != "2" for track_id, _ in lookups)
+                assert media_requests == ["1", "3"]
+
+            elif scenario == "prefetch_pending_end":
+                await asyncio.wait_for(pending_search.wait(), 5)
+                assert media_requests == ["1"]
+                await finish_audio()
+                await playing(2)
+                release_search.set()
+                await asyncio.wait_for(search_finished.wait(), 5)
+                assert prefetch_requests == [("2", "12")]
+                assert lookups[-1] == ("2", "12")
+                assert [track_id for track_id, _ in groupby(media_requests)] == ["1", "2"]
+
+            elif prefetch:
+                await page.wait_for_function("document.querySelector('#hitmos-audio').currentTime > 0.6")
+                assert prefetch_requests == [("2", "12")]
+                assert media_requests == ["1"]
+                assert await page.evaluate("localStorage.getItem('musicstream.hitmos.match.v1.2')") == saved
+                if scenario == "prefetch_expired":
+                    await page.evaluate("() => { const now = performance.now.bind(performance); performance.now = () => now() + 46_000; }")
+                if scenario == "prefetch_next":
+                    await next_track.click()
+                else:
+                    await row(1).locator("button").click()
+                    await expect(row(1)).to_have_class("track-row selected is-paused")
+                    await audio.evaluate("(a) => { a.currentTime = 1; }")
+                    await row(1).locator("button").click()
+                    await playing(1)
+                    assert prefetch_requests == [("2", "12")]
+                    await finish_audio()
+                await playing(2)
+                assert prefetch_requests == [("2", "12")]
+                assert len(await page.locator("audio").all()) == 1
+                if scenario in {"prefetch_ready", "prefetch_next"}:
+                    assert all(track_id != "2" for track_id, _ in lookups)
+                    assert await page.evaluate("localStorage.getItem('musicstream.hitmos.match.v1.2')") == saved
+                else:
+                    assert [(track_id, candidate) for track_id, candidate in lookups if track_id == "2"] == [("2", "12")]
+                assert [track_id for track_id, _ in groupby(media_requests)] == ["1", "2"]
+
+            elif scenario == "navigation":
                 await finish_audio()
                 await playing(2)
                 await previous.click()

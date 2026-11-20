@@ -62,11 +62,13 @@ def rank_batch(recording: RecordingReference, batch: DiscoveryBatch) -> SourceRe
     available = any(c.method == "youtube_iframe" and c.match.status != "mismatch" for c in candidates)
     result = SourceResult(source=batch.source, status="available" if available else "error" if batch.status == "error" else
                         "external_player" if candidates or batch.status == "blocked" else "unavailable",
-        reason=("unique_high_confidence" if selected else "ambiguous_candidates" if candidates else batch.reason),
+        reason=("unique_high_confidence" if selected else batch.reason if batch.retry_after_seconds is not None
+                else "ambiguous_candidates" if candidates else batch.reason),
         message=("Найдено единственное точное совпадение метаданных. Нажмите Play; идентичность мастера и доступность воспроизведения ещё не подтверждены." if selected else
-                 "Выберите запись: однозначное совпадение не подтверждено. Отклонённые версии не запускаются встроенным плеером." if candidates else batch.message),
+                 "Выберите запись: однозначное совпадение не подтверждено. Отклонённые версии не запускаются встроенным плеером."
+                 if candidates and batch.retry_after_seconds is None else batch.message),
         stage="matching" if candidates else "source_search", search_url=batch.search_url,
-        candidates=candidates, diagnostics=batch.diagnostics,
+        candidates=candidates, diagnostics=batch.diagnostics, retry_after_seconds=batch.retry_after_seconds,
         selection="automatic" if selected else "choose" if candidates else "none",
         selected_id=selected.id if selected else None, selected_source=batch.source if selected else None)
     if not batch.complete and candidates:

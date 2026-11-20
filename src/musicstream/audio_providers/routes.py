@@ -190,7 +190,7 @@ async def resolve_audio(
                     recording, allow_youtube=allow_youtube, exclude_hitmos_id=exclude_hitmos_id)
             else:
                 result = await request.app.state.audio_providers[provider].find(recording)
-            if result.status in {"available", "external_player"}:
+            if result.status in {"available", "external_player"} and result.retry_after_seconds is None:
                 ttl = 45 if hitmos_id or candidate_id else 60
                 cache[cache_key] = (time.monotonic() + ttl, result.model_copy(deep=True))
                 cache.move_to_end(cache_key)

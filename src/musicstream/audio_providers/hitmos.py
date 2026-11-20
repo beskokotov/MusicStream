@@ -1,6 +1,7 @@
 import json
 import asyncio
 import hashlib
+import math
 import re
 import time
 from collections import OrderedDict
@@ -16,6 +17,7 @@ from musicstream.providers.base import ProviderError
 MAX_SEARCH_CANDIDATES = 5
 MAX_METADATA_ENRICHMENTS = 3
 STREAM_PREPARATION_ENRICHMENT_TIMEOUT_SECONDS = 6.0
+HITMOS_BUDGET_MESSAGE = "Достигнут локальный лимит запросов Hitmos. Повторите попытку после паузы."
 
 
 class _StructuredMetadata(HTMLParser):
@@ -233,8 +235,9 @@ class HitmosProvider(AudioProvider):
             self._prepared_cache.move_to_end(key)
             return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
         result = await self.lookup(recording, candidate_id)
-        self._cache_prepared(recording, candidate_id, result,
-                             45 if result.status == "available" else 15)
+        if result.reason != "request_budget_exhausted":
+            self._cache_prepared(recording, candidate_id, result,
+                                 45 if result.status == "available" else 15)
         return result
 
     @staticmethod
@@ -252,7 +255,7 @@ class HitmosProvider(AudioProvider):
 
     async def _enrich_missing_durations(self, recording: RecordingReference,
                                         recordings: list[DiscoveredRecording], diagnostics=None
-                                        ) -> tuple[list[DiscoveredRecording], str | None, bool]:
+                                        ) -> tuple[list[DiscoveredRecording], str | None, bool, int | None]:
         enrichment_started = time.monotonic()
         request_count = 0
         request_ids = []
@@ -273,7 +276,7 @@ class HitmosProvider(AudioProvider):
                 diagnostics.metadata_enrichment_ids = []
                 diagnostics.metadata_lookup_elapsed_ms = 0
                 diagnostics.stream_preparation_elapsed_ms = 0
-            return recordings, None, False
+            return recordings, None, False, None
 
         ranked = rank_batch(recording, DiscoveryBatch(
             source="hitmos", status="ok", reason="candidates_found", message="",
@@ -291,6 +294,7 @@ class HitmosProvider(AudioProvider):
         require_unique = sum(hitmos_missing_duration_match(recording, candidate) for candidate in ranked) > 1
         by_id = {item.id: item for item in recordings}
         selected_id = None
+        budget_wait = None
         for ranked_candidate in ranked:
             if (ranked_candidate.match_score is None or ranked_candidate.match_score < .90
                     or normalize(ranked_candidate.title) != wanted_title
@@ -319,6 +323,9 @@ class HitmosProvider(AudioProvider):
                     continue
                 finally:
                     stream_preparation_ms += round((time.monotonic() - request_started) * 1000)
+                if checked.reason == "request_budget_exhausted":
+                    budget_wait = checked.retry_after_seconds
+                    break
                 checked_candidate = next((item for item in checked.candidates if item.id == candidate.id), None)
                 if checked_candidate is None:
                     continue
@@ -362,7 +369,7 @@ class HitmosProvider(AudioProvider):
             diagnostics.metadata_enrichment_ids = request_ids
             diagnostics.metadata_lookup_elapsed_ms = metadata_lookup_ms
             diagnostics.stream_preparation_elapsed_ms = stream_preparation_ms
-        return [by_id[item.id] for item in recordings], selected_id, require_unique
+        return [by_id[item.id] for item in recordings], selected_id, require_unique, budget_wait
 
     @staticmethod
     def _search_recordings(document, recording):
@@ -418,7 +425,9 @@ class HitmosProvider(AudioProvider):
         try:
             document = await self.reader.read_search(query)
             recordings, complete = self._search_recordings(document, recording)
-        except SourceFailure:
+        except SourceFailure as exc:
+            if exc.reason == "request_budget_exhausted":
+                raise
             return None
         candidates = [item for item in recordings if normalize(item.title) == wanted_title
                       and normalize(coartist) in {normalize(name) for name in (item.artist or "").split(",")}
@@ -436,6 +445,8 @@ class HitmosProvider(AudioProvider):
                     prepared = await self.prepare(recording, candidate.id)
             except TimeoutError:
                 return None
+            if prepared.reason == "request_budget_exhausted":
+                raise SourceFailure(prepared.reason, retry_after_seconds=prepared.retry_after_seconds)
             verified = next((item for item in prepared.candidates if item.id == candidate.id), None)
             if not verified:
                 return None
@@ -467,27 +478,43 @@ class HitmosProvider(AudioProvider):
                recording.deezer_id)
         async with self._search_gate:
             now = self._clock()
-            for expired in [key for key, (until, _) in self._search_cache.items() if until <= now]:
+            for expired in [key for key, (until, _, _) in self._search_cache.items() if until <= now]:
                 del self._search_cache[expired]
             cached = self._search_cache.get(key)
-            if cached:
-                return cached[1].model_copy(deep=True, update={"diagnostics": None, "reused_cache": True})
+            if cached and (cached[2] is None or cached[2] > now):
+                _, batch, retry_at = cached
+                remaining = math.ceil(retry_at - now) if retry_at is not None else None
+                return batch.model_copy(deep=True, update={
+                    "diagnostics": None, "reused_cache": True, "retry_after_seconds": remaining})
             try:
                 started_at = time.monotonic()
-                document = await self.reader.read_search(f"{recording.artist} {recording.title}")
+                document = None
+                if cached:
+                    # The search itself succeeded. Spend the next slot on the
+                    # pending enrichment instead of fetching the same page again.
+                    previous = cached[1]
+                    recordings, complete = previous.recordings, previous.complete
+                else:
+                    document = await self.reader.read_search(f"{recording.artist} {recording.title}")
+                    extraction_started = time.monotonic()
+                    recordings, complete = self._search_recordings(document, recording)
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.search_elapsed_ms = document.diagnostics.elapsed_ms
-                extraction_started = time.monotonic()
-                recordings, complete = self._search_recordings(document, recording)
-                if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.search_extraction_elapsed_ms = round(
                         (time.monotonic() - extraction_started) * 1000)
-                recordings, auto_candidate_id, require_unique = await self._enrich_missing_durations(
+                recordings, auto_candidate_id, require_unique, budget_wait = await self._enrich_missing_durations(
                     recording, recordings, document.diagnostics if isinstance(document, SourceDocument) else None)
+                if cached and cached[1].require_unique_hitmos_match:
+                    auto_candidate_id, require_unique = None, True
                 search_url = fallback.search_url
                 manual_selection = False
                 hitmos_artist = None
-                alternate = await self._search_by_coartist(recording, recordings)
+                try:
+                    alternate = await self._search_by_coartist(recording, recordings) if budget_wait is None else None
+                except SourceFailure as exc:
+                    if exc.reason != "request_budget_exhausted":
+                        raise
+                    budget_wait, alternate = exc.retry_after_seconds, None
                 if alternate is not None:
                     recordings, complete, alternate_document, query, hitmos_artist = alternate
                     search_url = "https://ru.hitmox.org/search?" + urlencode({"q": query})
@@ -500,15 +527,17 @@ class HitmosProvider(AudioProvider):
                                                      alternate_document.diagnostics.elapsed_ms))
                 if isinstance(document, SourceDocument) and document.diagnostics is not None:
                     document.diagnostics.elapsed_ms = round((time.monotonic() - started_at) * 1000)
-                result = DiscoveryBatch(source="hitmos", status="ok",
-                    reason="candidates_found" if recordings else "no_results",
-                    message="Метаданные найдены; поток будет проверен по Play." if recordings else
-                            "Hitmos не вернул кандидатов.",
+                result = DiscoveryBatch(source="hitmos", status="error" if budget_wait is not None and not recordings else "ok",
+                    reason="request_budget_exhausted" if budget_wait is not None else "candidates_found" if recordings else "no_results",
+                    message=HITMOS_BUDGET_MESSAGE if budget_wait is not None else
+                            "Метаданные найдены; поток будет проверен по Play." if recordings else "Hitmos не вернул кандидатов.",
                     search_url=search_url, recordings=recordings,
                     complete=complete, auto_candidate_id=auto_candidate_id,
                     require_unique_hitmos_match=require_unique,
                     hitmos_manual_selection=manual_selection,
                     hitmos_artist=hitmos_artist,
+                    retry_after_seconds=budget_wait,
+                    reused_cache=cached is not None,
                     diagnostics=(document.diagnostics if self.diagnostics_enabled
                                  and isinstance(document, SourceDocument) else None))
             except SourceFailure as exc:
@@ -521,9 +550,15 @@ class HitmosProvider(AudioProvider):
                     diag.internal_code = exc.reason
                 result = fallback.model_copy(update={"reason": exc.reason,
                     "status": "error",
-                    "message": "Поиск Hitmos недоступен. Можно открыть исходный сайт или повторить позже.",
+                    "message": HITMOS_BUDGET_MESSAGE if exc.reason == "request_budget_exhausted" else
+                               "Поиск Hitmos недоступен. Можно открыть исходный сайт или повторить позже.",
+                    "retry_after_seconds": exc.retry_after_seconds if exc.reason == "request_budget_exhausted" else None,
                     "diagnostics": diag if self.diagnostics_enabled else None})
-            self._search_cache[key] = (self._clock() + (30 if result.status == "error" else 60), result.model_copy(deep=True))
+            if result.reason != "request_budget_exhausted" or result.recordings:
+                now = self._clock()
+                retry_at = now + result.retry_after_seconds if result.retry_after_seconds is not None else None
+                ttl = 30 if result.status == "error" else 60
+                self._search_cache[key] = ((retry_at or now) + ttl, result.model_copy(deep=True), retry_at)
             while len(self._search_cache) > 64:
                 self._search_cache.popitem(last=False)
             return result
@@ -620,5 +655,8 @@ class HitmosProvider(AudioProvider):
                     diag.stage = "redirect"
             return SourceResult(source="hitmos", status="error", reason=exc.reason,
                                 stage=exc.stage or "source_metadata",
-                                message="Не удалось получить или прочитать метаданные Hitmos. Сопоставление и воспроизведение ещё не подтверждены. Можно открыть исходную запись.", search_url=url,
+                                message=HITMOS_BUDGET_MESSAGE if exc.reason == "request_budget_exhausted" else
+                                        "Не удалось получить или прочитать метаданные Hitmos. Сопоставление и воспроизведение ещё не подтверждены. Можно открыть исходную запись.",
+                                search_url=url,
+                                retry_after_seconds=exc.retry_after_seconds if exc.reason == "request_budget_exhausted" else None,
                                 diagnostics=diag if self.diagnostics_enabled else None)

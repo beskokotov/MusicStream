@@ -47,6 +47,7 @@ async def main():
     explicit_track = False
     sequential_track = False
     sequential_success = False
+    budget_stage = None
     audio_token = "/api/audio/hitmos-stream/" + "A" * 32
     broken_audio_token = "/api/audio/hitmos-stream/" + "B" * 32
     async with async_playwright() as runtime:
@@ -70,6 +71,10 @@ async def main():
                 if "/api/audio/resolve?" in url:
                     requests.append(url)
                     params = parse_qs(urlsplit(url).query)
+                    if budget_stage == ("source_metadata" if "hitmos_id" in params else "source_search"):
+                        return await route.fulfill(json={"source": "hitmos", "status": "error",
+                            "reason": "request_budget_exhausted", "stage": budget_stage,
+                            "retry_after_seconds": 17, "candidates": []})
                     if "hitmos_id" in params:
                         song_id = params["hitmos_id"][0]
                         if sequential_track:
@@ -278,6 +283,24 @@ async def main():
             assert await sequence_preference.is_checked()
             stored = json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))
             assert stored["songId"] == "5" and not stored.get("user_confirmed")
+
+            budget_stage = "source_metadata"
+            requests.clear()
+            await select_after_reload()
+            await page.get_by_text("Повторите попытку через 17 с.", exact=False).wait_for()
+            assert attempted_ids() == ["5"]
+            assert json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key)) == stored
+            await page.evaluate("(key) => localStorage.removeItem(key)", key)
+            requests.clear()
+            await select_after_reload()
+            await page.get_by_text("Повторите попытку через 17 с.", exact=False).wait_for()
+            assert attempted_ids() == [None, "4"]
+
+            budget_stage = "source_search"
+            requests.clear()
+            await select_after_reload()
+            await page.get_by_text("Повторите попытку через 17 с.", exact=False).wait_for()
+            assert attempted_ids() == [None]
             assert not errors, errors
             print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:

@@ -14,6 +14,7 @@ from musicstream.audio_providers.matching import assess, assess_hitmos
 from musicstream.audio_providers.service import SourceSelectionService
 from musicstream.audio_providers.transport import SourceFailure
 from musicstream.main import app as local_app
+from musicstream.public_rate_limit import ClientRateLimiter
 from musicstream.public_api import app as public_app
 
 REF = RecordingReference(title="Sonne", artist="Rammstein", duration_seconds=272)
@@ -560,7 +561,9 @@ def test_browser_search_fetches_query_without_loading_media(monkeypatch):
     monkeypatch.setattr(api, "async_playwright", lambda: SimpleNamespace(start=AsyncMock(return_value=runtime)))
 
     async def run():
-        reader = HitmosBrowserReader()
+        reader = HitmosBrowserReader(diagnostics_enabled=True)
+        now = [0.]
+        reader._budget = ClientRateLimiter(limit=2, clock=lambda: now[0])
         result = await reader.read_search("Rammstein Sonne")
         await reader.read_search("Rammstein Sonne")
         assert parse_search_ids(result.html) == ["1"]
@@ -568,8 +571,75 @@ def test_browser_search_fetches_query_without_loading_media(monkeypatch):
         page.evaluate.assert_not_called()
         runtime.chromium.launch.assert_awaited_once()
         assert context.close.await_count == 2
+        with pytest.raises(SourceFailure) as denied:
+            await reader.read_search("Rammstein Sonne")
+        assert (denied.value.reason, denied.value.stage, denied.value.retry_after_seconds) == (
+            "request_budget_exhausted", "source_search", 60)
+        now[0] = 12.5
+        with pytest.raises(SourceFailure) as denied:
+            await reader.read_song("1")
+        assert denied.value.retry_after_seconds == 48
+        assert visited == [SEARCH, SEARCH]
+        now[0] = 60
+        await reader.read_search("Rammstein Sonne")
+        assert visited == [SEARCH, SEARCH, SEARCH]
         await reader.close()
         browser.close.assert_awaited_once()
+    asyncio.run(run())
+
+
+def test_hitmos_budget_wait_preserves_search_and_resumes_card_without_reopening_search():
+    now = [0.]
+
+    class MeteredReader(Reader):
+        def __init__(self):
+            super().__init__({"1": ("Sonne", "Rammstein", 272)})
+            self.budget = ClientRateLimiter(limit=1, clock=lambda: now[0])
+
+        def reserve(self, stage):
+            delay = self.budget.check("browser")
+            if delay is not None:
+                raise SourceFailure("request_budget_exhausted", owner="local_policy", stage=stage,
+                                    retry_after_seconds=delay)
+
+        async def read_search(self, query):
+            self.reserve("source_search")
+            self.calls.append(("search", query))
+            return await Reader({"1": ("Sonne", "Rammstein", None),
+                                 "2": ("Sonne Live", "Rammstein", 272)}).read_search(query)
+
+        async def read_song(self, song_id, **kwargs):
+            self.reserve("source_metadata")
+            return await super().read_song(song_id, **kwargs)
+
+    async def run():
+        reader = MeteredReader()
+        reader.reserve("source_search")
+        provider = HitmosProvider(reader)
+        provider._clock = lambda: now[0]
+        service = SourceSelectionService({"hitmos": provider}, clock=lambda: now[0])
+        denied = await service.discover(REF)
+        assert denied.reason == "request_budget_exhausted" and denied.retry_after_seconds == 60
+        now[0] = 58
+        preparation = await service.prepare(REF, "hitmos", "1")
+        assert preparation.retry_after_seconds == 2 and preparation.diagnostics is None
+        assert (await service.discover(REF)).retry_after_seconds == 2
+        assert not reader.calls
+
+        now[0] = 60
+        partial = await service.discover(REF)
+        assert partial.candidates and partial.retry_after_seconds == 60
+        now[0] = 119
+        cached = await service.discover(REF)
+        assert cached.reused_cache and cached.retry_after_seconds == 1
+        assert reader.calls == [("search", "Rammstein Sonne")]
+
+        now[0] = 120
+        resumed = await service.discover(REF)
+        assert resumed.selected_id == "1" and resumed.retry_after_seconds is None
+        assert (await service.prepare(REF, "hitmos", "1")).reused_cache
+        assert reader.calls == [("search", "Rammstein Sonne"), ("1", False)]
+
     asyncio.run(run())
 
 

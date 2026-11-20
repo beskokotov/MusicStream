@@ -99,7 +99,8 @@ class SourceSelectionService:
                         batch = await provider.discover(recording)
                     if not isinstance(batch, DiscoveryBatch) or batch.source != source:
                         raise ValueError("Invalid discovery contract")
-                    self._put(self._batches, key, batch, 15 if batch.status == "error" else 30 if batch.status == "blocked" else 60)
+                    if batch.reason != "request_budget_exhausted" and batch.retry_after_seconds is None:
+                        self._put(self._batches, key, batch, 15 if batch.status == "error" else 30 if batch.status == "blocked" else 60)
                     return batch.model_copy(deep=True)
         except TimeoutError:
             reason, message = "provider_timeout", "Источник не ответил вовремя. Это не означает, что композиция отсутствует."
@@ -178,11 +179,13 @@ class SourceSelectionService:
             if chosen and candidate.source == "hitmos" and candidate.id in equivalent_ids and candidate is not chosen:
                 candidate.selection_reason = "equivalent_recording"
         trouble = any(batch.status != "ok" for batch in batches)
+        budget_limited = bool(hitmos_batch and hitmos_batch.retry_after_seconds is not None)
         if hitmos_batch and hitmos_batch.diagnostics:
             hitmos_batch.diagnostics.matching_elapsed_ms = round((time.monotonic() - matching_started) * 1000)
         result = SourceResult(source="auto", status="available" if chosen else "external_player" if candidates or trouble else "unavailable",
-            reason="unique_high_confidence" if chosen else "ambiguous_candidates" if candidates else "sources_unavailable" if trouble else "no_results",
+            reason="unique_high_confidence" if chosen else "request_budget_exhausted" if budget_limited else "ambiguous_candidates" if candidates else "sources_unavailable" if trouble else "no_results",
             message="Источник подобран по метаданным. Нажмите Play для проверки воспроизведения." if chosen else
+                    hitmos_batch.message if budget_limited else
                     "Нужен ваш выбор записи; однозначное совпадение не подтверждено." if candidates else
                     "Автоматический подбор недоступен. Причины по источникам указаны ниже; доступны оригинальные сервисы и раздел «Дополнительно»." if trouble else
                     "Доступные источники не вернули записей по этому запросу.",
@@ -192,7 +195,8 @@ class SourceSelectionService:
             stage="matching" if candidates else "source_search",
             diagnostics=(hitmos_batch.diagnostics if hitmos_batch and not hitmos_batch.reused_cache else None),
             reused_cache=bool(hitmos_batch and hitmos_batch.reused_cache),
-            sources=[ProviderSummary(**batch.model_dump(include={"source", "status", "reason", "message", "search_url"})) for batch in batches])
+            retry_after_seconds=hitmos_batch.retry_after_seconds if budget_limited else None,
+            sources=[ProviderSummary(**batch.model_dump(include={"source", "status", "reason", "message", "search_url", "retry_after_seconds"})) for batch in batches])
         return result
 
     def remember(self, recording: RecordingReference, result: SourceResult):
@@ -236,6 +240,6 @@ class SourceSelectionService:
             logger.warning("Audio source preparation failed (%s)", type(exc).__name__)
             result = SourceResult(source=source, status="error", reason="provider_error", stage="stream_resolution",
                 message="Не удалось подготовить источник. Можно открыть оригинальный сервис.", search_url=search_url(source, recording))
-        if result.status != "available" or not self.remember(recording, result):
+        if result.reason != "request_budget_exhausted" and (result.status != "available" or not self.remember(recording, result)):
             self.forget(recording, source, candidate_id)
         return result

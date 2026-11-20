@@ -127,6 +127,7 @@ class DiscoveryBatch(BaseModel):
     hitmos_artist: str | None = None
     diagnostics: ResolutionDiagnostics | None = None
     reused_cache: bool = False
+    retry_after_seconds: int | None = None
 
 
 class ProviderSummary(BaseModel):
@@ -135,6 +136,7 @@ class ProviderSummary(BaseModel):
     reason: str
     message: str
     search_url: str
+    retry_after_seconds: int | None = None
 
 
 class SourceResult(BaseModel):
@@ -152,6 +154,7 @@ class SourceResult(BaseModel):
     sources: list[ProviderSummary] = Field(default_factory=list)
     reused_match: bool = False
     reused_cache: bool = False
+    retry_after_seconds: int | None = None
 
 
 class AudioProvider(ABC):

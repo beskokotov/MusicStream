@@ -1888,6 +1888,7 @@ const musicPlayer = (() => {
           && result.candidates?.find(candidate => candidate.id === savedMatch.songId
             && candidate.method === "html_audio" && validHitmosStream(candidate.stream_url, candidate.id)
             && verifiedHitmosMatch(track, candidate, savedMatch.user_confirmed === true));
+        if (result?.reason === "request_budget_exhausted") return showHitmosBudget(result);
         if (!item) return searchAfterFailure();
         timing.hitmos_saved_match = "hit";
         timing.hitmos_search_ms = 0;
@@ -1921,6 +1922,7 @@ const musicPlayer = (() => {
       if (!search.ok) return fallback(`hitmos_search_http_${search.status}`);
       const discovered = await search.json();
       if (current !== generation) return;
+      if (discovered.reason === "request_budget_exhausted") return showHitmosBudget(discovered);
       discoveryReusedCache = discovered.reused_cache === true || discovered.reused_match === true;
       discoveryDiagnostics = discoveryReusedCache ? null : discovered.diagnostics || null;
       const diagnostics = discoveryDiagnostics || {};
@@ -1982,6 +1984,7 @@ const musicPlayer = (() => {
         if (!resolved.ok) return { reason: `hitmos_stream_http_${resolved.status}` };
         const prepared = await resolved.json();
         if (current !== generation) return { stale: true };
+        if (prepared.reason === "request_budget_exhausted") return { budget: prepared };
         candidateReusedCache = prepared.reused_cache === true;
         if (Number.isFinite(prepared.diagnostics?.elapsed_ms)) {
           timing.hitmos_stream_preparation_ms = (timing.hitmos_stream_preparation_ms || 0)
@@ -2009,6 +2012,7 @@ const musicPlayer = (() => {
           continue;
         }
         if (resolved.stale) return;
+        if (resolved.budget) return showHitmosBudget(resolved.budget, discovered);
         if (resolved.stream) {
           stream = resolved.stream;
           selectedPreparedDiagnostics = resolved.diagnostics;
@@ -2082,6 +2086,10 @@ const musicPlayer = (() => {
             continue;
           }
           if (resolved.stale || current !== generation || automaticHitmos !== context) return true;
+          if (resolved.budget) {
+            showHitmosBudget(resolved.budget, discovered);
+            return true;
+          }
           nextCandidateIndex = index + 1;
           if (!resolved.stream) {
             lastReason = resolved.reason || "hitmos_stream_unavailable";
@@ -2494,12 +2502,27 @@ const musicPlayer = (() => {
     updateSourceControls();
   }).catch(() => {});
 
+  function hitmosBudgetMessage(seconds) {
+    return Number.isInteger(seconds) && seconds > 0
+      ? `Достигнут локальный лимит запросов Hitmos. Повторите попытку через ${seconds} с.`
+      : "Достигнут локальный лимит запросов Hitmos. Повторите попытку после паузы.";
+  }
+
+  function showHitmosBudget(result, discovery = null) {
+    if (automaticHitmos?.timer) clearTimeout(automaticHitmos.timer);
+    automaticHitmos = null;
+    presentSourceOptions({ ...result, candidates: discovery?.candidates || result.candidates,
+      sources: discovery?.sources || result.sources });
+    playbackState.textContent = "Пауза между запросами Hitmos";
+  }
+
   function presentSourceOptions(result) {
     const items = Array.isArray(result.candidates) ? result.candidates : [];
     setTilePlaybackState(selected?.id, "idle");
     document.querySelector("#developer-mode").open = true;
     updateSourceControls();
-    message.textContent = result.message || "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0434\u0435\u043d\u0438\u044f.";
+    message.textContent = result.reason === "request_budget_exhausted" ? hitmosBudgetMessage(result.retry_after_seconds)
+      : result.message || "\u0412\u044b\u0431\u0435\u0440\u0438\u0442\u0435 \u0438\u0441\u0442\u043e\u0447\u043d\u0438\u043a \u0432\u043e\u0441\u043f\u0440\u043e\u0438\u0437\u0432\u0435\u0434\u0435\u043d\u0438\u044f.";
     reports.replaceChildren();
     for (const report of Array.isArray(result.sources) ? result.sources : []) {
       if (!["hitmos", "youtube"].includes(report.source)) continue;
@@ -2563,6 +2586,7 @@ const musicPlayer = (() => {
       }
       const result = await response.json();
       if (current !== generation) return;
+      if (result.reason === "request_budget_exhausted") return showHitmosBudget(result);
       message.textContent = `${result.stage ? `Этап: ${stageLabels[result.stage] || "получение источника"}. ` : ""}${result.message || "Источник не сообщил о доступных записях."}`;
       for (const report of Array.isArray(result.sources) ? result.sources : []) {
         if (!["hitmos", "youtube"].includes(report.source)) continue;

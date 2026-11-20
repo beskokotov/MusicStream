@@ -163,8 +163,6 @@ class HitmosBrowserReader:
 
         if not search_url and not re.fullmatch(r"[0-9]{1,12}", song_id):
             raise SourceFailure("invalid_song_id")
-        if self._budget.check("browser") is not None:
-            raise SourceFailure("request_budget_exhausted", stage="source_metadata", diagnostics=diagnostics)
         try:
             from playwright.async_api import TimeoutError as PlaywrightTimeoutError, async_playwright
         except ImportError as exc:
@@ -173,6 +171,11 @@ class HitmosBrowserReader:
         oversized = [False]
         async with self._gate:
             try:
+                retry_after = self._budget.check("browser")
+                if retry_after is not None:
+                    raise SourceFailure("request_budget_exhausted", owner="local_policy",
+                                        stage="source_search" if search_url else "source_metadata",
+                                        retry_after_seconds=retry_after)
                 browser_was_connected = self._browser is not None and self._browser.is_connected()
                 browser_started_at = time.monotonic()
                 browser = await self._get_browser(async_playwright)

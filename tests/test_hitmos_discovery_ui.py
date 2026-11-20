@@ -27,12 +27,28 @@ async def main():
     missing_duration = (await SourceSelectionService({"hitmos": missing_duration_provider}).discover(REF)).model_dump()
     explicit_provider = HitmosProvider(Reader({"2": ("Sonne", "Rammstein", 272)}))
     explicit_service = SourceSelectionService({"hitmos": explicit_provider})
+    sequential_provider = HitmosProvider(Reader({
+        "4": ("Sonne", "Rammstein", 272),
+        "5": ("Sonne", "Rammstein", 274),
+        "6": ("Sonne", "Rammstein", 271),
+        "7": ("Sonne", "Rammstein", 275),
+        "8": ("Sonne", "Rammstein", None),
+        "9": ("Sonne Live", "Rammstein", 272),
+    }))
+    sequential = (await SourceSelectionService({"hitmos": sequential_provider}).discover(REF)).model_dump()
+    sequential.update(selection="choose", selected_id=None, selected_source=None)
+    mismatch = (await sequential_provider.lookup(REF, "9")).candidates[0]
+    sequential["candidates"].append(mismatch.model_copy(update={"source": "hitmos"}).model_dump())
+    sequential["candidates"].reverse()
     scenario = [automatic]
     requests = []
     serve_audio = False
     omit_duration = False
     explicit_track = False
+    sequential_track = False
+    sequential_success = False
     audio_token = "/api/audio/hitmos-stream/" + "A" * 32
+    broken_audio_token = "/api/audio/hitmos-stream/" + "B" * 32
     async with async_playwright() as runtime:
         try:
             browser = await runtime.chromium.launch(channel="chrome", headless=True)
@@ -56,6 +72,12 @@ async def main():
                     params = parse_qs(urlsplit(url).query)
                     if "hitmos_id" in params:
                         song_id = params["hitmos_id"][0]
+                        if sequential_track:
+                            if song_id == "4" or (song_id == "5" and not sequential_success):
+                                return await route.fulfill(status=503)
+                            prepared = await sequential_provider.lookup(REF, song_id)
+                            prepared.candidates[0].stream_url = broken_audio_token if song_id == "6" else audio_token
+                            return await route.fulfill(json=prepared.model_dump())
                         if song_id == "1":
                             return await route.abort("failed")
                         source_provider = (explicit_provider if explicit_track else
@@ -227,6 +249,35 @@ async def main():
             await select_after_reload()
             await wait_for_playing()
             assert len(requests) == 1 and "hitmos_id=2" in requests[0]
+
+            explicit_track = False
+            sequential_track = True
+            scenario[0] = sequential
+            await page.evaluate("(key) => localStorage.removeItem(key)", key)
+            await select_after_reload()
+            await page.locator("#source-candidates .source-candidate").first.wait_for()
+            sequence_preference = page.locator("#hitmos-try-matching-candidates")
+            assert not await sequence_preference.is_checked()
+            await sequence_preference.check()
+
+            def attempted_ids():
+                return [parse_qs(urlsplit(url).query).get("hitmos_id", [None])[0] for url in requests]
+
+            requests.clear()
+            await select_after_reload()
+            await page.wait_for_function("document.querySelector('.track-row').classList.contains('has-error')")
+            assert attempted_ids() == [None, "4", "6", "5"]
+            assert await page.evaluate("(key) => localStorage.getItem(key)", key) is None
+
+            sequential_success = True
+            requests.clear()
+            timings.clear()
+            await select_after_reload()
+            await wait_for_playing()
+            assert attempted_ids() == [None, "4", "6", "5"]
+            assert await sequence_preference.is_checked()
+            stored = json.loads(await page.evaluate("(key) => localStorage.getItem(key)", key))
+            assert stored["songId"] == "5" and not stored.get("user_confirmed")
             assert not errors, errors
             print("BROWSER PASS: automatic discovery on selection, one-click Auto Play, ambiguous selection, source error fallback, advanced manual input, source switching, responsive layout, no fake playback")
         finally:
